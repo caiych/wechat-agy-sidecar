@@ -1,16 +1,19 @@
 """
 WeChat Antigravity Sidecar Orchestrator & Daemon.
-Handles persistent user conversation threading and /new command routing.
+Handles persistent user conversation threading, /new command routing,
+and proactive background event streaming via agentapi & transcript monitoring.
 """
 
 from __future__ import annotations
 
+import os
+import json
 import time
 import signal
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict
 
 from wechat_agy_sidecar.config import SidecarConfig
 from wechat_agy_sidecar.client import WeChatIlinkClient, InboundMessage, TerminalQR
@@ -18,15 +21,18 @@ from wechat_agy_sidecar.agent import AntigravityAgent
 
 logger = logging.getLogger("wechat_agy_sidecar.daemon")
 
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
+
 
 class WeChatSidecar:
-    """Main daemon managing WeChat iLink event polling and Antigravity SDK routing."""
+    """Main daemon managing WeChat iLink event polling, agentapi routing, and proactive streaming."""
 
     def __init__(self, config: Optional[SidecarConfig] = None):
         self.config = config or SidecarConfig.load()
         self.client = WeChatIlinkClient(self.config)
         self.agent = AntigravityAgent(self.config)
         self.running = True
+        self.conversation_cursors: Dict[str, int] = {}  # conv_id -> last_seen_line_count
 
     def run_onboarding_login(self) -> bool:
         """Runs the interactive QR-code authentication flow."""
@@ -89,7 +95,6 @@ class WeChatSidecar:
                 return
             elif text.lower().startswith(f"{cmd_prefix} ") or text.lower().startswith(f"{cmd_prefix}：") or text.lower().startswith(f"{cmd_prefix}:"):
                 force_new_thread = True
-                # Remove prefix
                 sep_idx = text.find(" ")
                 if sep_idx == -1:
                     sep_idx = max(text.find("："), text.find(":"))
@@ -102,36 +107,96 @@ class WeChatSidecar:
             self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话线程！请输入你的问题：")
             return
 
-        logger.info(f"Incoming message from [{user_id}]: {actual_prompt} (force_new={force_new_thread})")
+        logger.info(f"Incoming message from [{user_id}]: {actual_prompt[:60]} (force_new={force_new_thread})")
         
         # 1. Determine conversation ID for this user
         conv_id = None if force_new_thread else self.config.get_conversation_id(user_id)
         if conv_id:
             logger.info(f"Continuing thread [{conv_id}] for user [{user_id}]")
         else:
-            logger.info(f"Starting new thread for user [{user_id}]")
+            logger.info(f"Starting new thread for user [{user_id}] via agentapi")
 
         # 2. Send typing status
         self.client.send_typing(user_id, typing=True)
 
-        # 3. Execute via Antigravity with conversation ID
+        # 3. Execute via Antigravity agentapi
         start_t = time.time()
         reply_text, new_conv_id = await self.agent.execute(actual_prompt, conversation_id=conv_id)
         elapsed = time.time() - start_t
         logger.info(f"Antigravity reply generated in {elapsed:.2f}s (conv={new_conv_id}) for [{user_id}]")
 
-        # 4. Save updated thread ID
+        # 4. Save updated thread ID and update cursor
         if new_conv_id:
             self.config.set_conversation_id(user_id, new_conv_id)
+            # Update cursor to current line count so proactive watcher doesn't duplicate this reply
+            t_file = BRAIN_DIR / new_conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+            if t_file.exists():
+                try:
+                    self.conversation_cursors[new_conv_id] = len(t_file.read_text(encoding="utf-8").strip().splitlines())
+                except Exception:
+                    pass
 
         # 5. Cancel typing & send reply
         self.client.send_typing(user_id, typing=False)
         self.client.send_message(user_id, msg.context_token, reply_text)
 
+    async def proactive_event_watcher(self):
+        """
+        Background task continuously monitoring active user conversation transcripts.
+        Pushes any new Assistant responses (e.g. background timers, subagents) to WeChat.
+        """
+        logger.info("Proactive event watcher started.")
+        while self.running:
+            await asyncio.sleep(2.0)
+            try:
+                # Invert mapping: conv_id -> user_id
+                conv_to_user = {c_id: u_id for u_id, c_id in self.config.user_conversations.items()}
+
+                for conv_id, user_id in conv_to_user.items():
+                    t_file = BRAIN_DIR / conv_id / ".system_generated" / "logs" / "transcript.jsonl"
+                    if not t_file.exists():
+                        continue
+
+                    try:
+                        lines = t_file.read_text(encoding="utf-8").strip().splitlines()
+                    except Exception:
+                        continue
+
+                    last_seen = self.conversation_cursors.get(conv_id, len(lines))
+                    if len(lines) > last_seen:
+                        for line in lines[last_seen:]:
+                            try:
+                                step = json.loads(line)
+                                # Check if it is an async assistant response
+                                if step.get("type") == "PLANNER_RESPONSE" and step.get("content"):
+                                    content = step.get("content", "").strip()
+                                    if content and not step.get("tool_calls"):
+                                        logger.info(f"Pushing proactive background message to user [{user_id}] from conv [{conv_id}]")
+                                        self.client.send_message(user_id, "", content)
+                            except Exception as e:
+                                logger.debug(f"Error parsing proactive step: {e}")
+
+                        self.conversation_cursors[conv_id] = len(lines)
+
+            except Exception as e:
+                logger.error(f"Proactive watcher error: {e}", exc_info=True)
+
     async def poll_loop(self):
-        """Long-polling main event loop."""
+        """Long-polling main event loop with proactive background watcher."""
         logger.info("Starting WeChat Long-Polling daemon (getupdates)...")
         loop = asyncio.get_event_loop()
+
+        # Initialize existing transcript cursors
+        for u_id, c_id in self.config.user_conversations.items():
+            t_file = BRAIN_DIR / c_id / ".system_generated" / "logs" / "transcript.jsonl"
+            if t_file.exists():
+                try:
+                    self.conversation_cursors[c_id] = len(t_file.read_text(encoding="utf-8").strip().splitlines())
+                except Exception:
+                    pass
+
+        # Start proactive watcher concurrently
+        asyncio.create_task(self.proactive_event_watcher())
 
         while self.running:
             try:
