@@ -115,7 +115,6 @@ To enable native Antigravity lifecycle management, copy or symlink `sidecar.json
 | `/reset` | Alias for `/new`. | `/reset` |
 | *(Image)* | Uploads image; automatically decrypted for agent inspection. | `[Image Attachment]` |
 | *(Voice)* | Voice input; passed with transcribed text and registered `media_id` for on-demand inspection. | `[Voice Input]` |
-| *(y / n / 同意 / 拒绝)* | Approves or rejects remote tool execution / permission requests. | `y` |
 
 ---
 
@@ -138,10 +137,10 @@ wechat-agy-sidecar download-media --url "<CDN_URL>" --key "<AES_KEY>" --output "
 
 - ✅ **Sidebar & Conversation Discovery**: Fully resolved with `agentapi` integration — conversations created via `agentapi new-conversation` are first-class Antigravity sessions and immediately accessible.
 - ✅ **Proactive Timer & Subagent Push**: Resolved via `proactive_event_watcher` reading real-time conversation trajectories.
-- ✅ **Interactive Permission & Question Cards**: Relays permission prompts and questions directly to WeChat for remote `y`/`n` authorization.
 - ✅ **Voice Media Registry & CLI**: Clean metadata registry (`~/.gemini/wechat_media/registry.json`) for lazy audio inspection with zero token/arg clutter.
-- ✅ **Multi-Session Switcher (`/resume`)**: View recent conversation history and switch active threads seamlessly.
+- ✅ **Multi-Session Switcher (`/resume`)**: View recent conversation history and switch active threads across IDE, CLI, and WeChat.
 - ✅ **Project ID Routing**: Configure `WECHAT_SIDECAR_PROJECT_ID` or config `project_id` to route conversations to specific workspaces.
+- ⏳ **Native Permission Protocol Streaming**: Requires native Antigravity permission IPC bridge.
 
 ---
 

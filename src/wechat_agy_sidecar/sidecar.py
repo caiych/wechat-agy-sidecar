@@ -34,7 +34,6 @@ class WeChatSidecar:
         self.running = True
         self.conversation_cursors: Dict[str, int] = {}  # conv_id -> last_seen_line_count
         self.pending_resume: Dict[str, List[Dict]] = {}  # user_id -> list of recent conv dicts
-        self.notified_permission_steps: Set[str] = set()  # "conv_id:step_index" -> already notified
 
     def run_onboarding_login(self) -> bool:
         """Runs the interactive QR-code authentication flow."""
@@ -259,53 +258,12 @@ class WeChatSidecar:
                                 step_idx = step.get("step_index", 0)
                                 step_type = step.get("type", "")
 
-                                # Case 1: Proactive text output (timers, scheduled tasks, background subagents)
+                                # Proactive text output (timers, scheduled tasks, background subagents)
                                 if step_type == "PLANNER_RESPONSE" and step.get("content"):
                                     content = step.get("content", "").strip()
                                     if content and not step.get("tool_calls"):
                                         logger.info(f"Pushing proactive background message to user [{user_id}] from conv [{conv_id}]")
                                         self.client.send_message(user_id, "", content)
-
-                                # Case 2: Interactive Permission / Tool Request Cards
-                                if step_type == "PLANNER_RESPONSE" and step.get("tool_calls"):
-                                    for tool_call in step.get("tool_calls", []):
-                                        tool_name = tool_call.get("name", "")
-                                        tool_args = tool_call.get("args", {})
-                                        perm_key = f"{conv_id}:{step_idx}:{tool_name}"
-
-                                        if perm_key not in self.notified_permission_steps:
-                                            self.notified_permission_steps.add(perm_key)
-
-                                            # Formatting interactive cards
-                                            if tool_name == "ask_question":
-                                                questions = tool_args.get("questions", [])
-                                                q_parts = []
-                                                for q in questions:
-                                                    q_text = q.get("question", "")
-                                                    opts = q.get("options", [])
-                                                    opt_str = "\n".join([f"  {oi+1}. {opt}" for oi, opt in enumerate(opts)])
-                                                    q_parts.append(f"❓ {q_text}\n{opt_str}")
-                                                card = (
-                                                    "💬 [Antigravity 交互提问]\n"
-                                                    + "\n\n".join(q_parts)
-                                                    + "\n\n👉 请直接回复选项序号或内容进行选择。"
-                                                )
-                                                self.client.send_message(user_id, "", card)
-
-                                            elif tool_name in ["run_command", "write_to_file", "replace_file_content"]:
-                                                action = tool_args.get("toolAction") or tool_args.get("toolSummary") or tool_name
-                                                detail = tool_args.get("CommandLine") or tool_args.get("TargetFile") or ""
-                                                if len(detail) > 140:
-                                                    detail = detail[:140] + "..."
-                                                card = (
-                                                    "⚠️ [Antigravity 权限确认 / 操作申请]\n"
-                                                    f"🔧 工具: `{tool_name}`\n"
-                                                    f"📌 说明: {action}\n"
-                                                    + (f"💻 详情: `{detail}`\n" if detail else "")
-                                                    + "\n👉 回复 \"y\" (同意) 或 \"n\" (拒绝) 进行授权确认。"
-                                                )
-                                                self.client.send_message(user_id, "", card)
-
                             except Exception as e:
                                 logger.debug(f"Error parsing proactive step: {e}")
 
