@@ -1,5 +1,5 @@
 """
-Unit tests for WeChat Antigravity Sidecar configuration and client protocol.
+Unit tests for WeChat Antigravity Sidecar configuration, client protocol, and threading.
 """
 
 import unittest
@@ -24,6 +24,24 @@ class TestWeChatSidecar(unittest.TestCase):
             self.assertTrue(bool(loaded.uin))
             self.assertIn("Authorization", loaded.get_auth_headers())
             self.assertEqual(loaded.get_auth_headers()["AuthorizationType"], "ilink_bot_token")
+
+    def test_conversation_threading_persistence(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = Path(tmpdir) / "test_config.json"
+            cfg = SidecarConfig.load(cfg_file)
+            
+            user_a = "user_wx_1"
+            conv_id_1 = "conv-uuid-12345"
+            cfg.set_conversation_id(user_a, conv_id_1)
+            self.assertEqual(cfg.get_conversation_id(user_a), conv_id_1)
+
+            # Reload from disk
+            loaded = SidecarConfig.load(cfg_file)
+            self.assertEqual(loaded.get_conversation_id(user_a), conv_id_1)
+
+            # Reset conversation
+            cfg.reset_conversation(user_a)
+            self.assertIsNone(cfg.get_conversation_id(user_a))
 
     def test_inbound_message_dataclass(self):
         msg = InboundMessage(

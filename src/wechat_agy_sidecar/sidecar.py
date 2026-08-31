@@ -1,5 +1,6 @@
 """
 WeChat Antigravity Sidecar Orchestrator & Daemon.
+Handles persistent user conversation threading.
 """
 
 from __future__ import annotations
@@ -68,21 +69,42 @@ class WeChatSidecar:
         return False
 
     async def handle_message(self, msg: InboundMessage):
-        """Dispatches an incoming WeChat message to the Antigravity SDK."""
-        logger.info(f"Incoming message from [{msg.from_user_id}]: {msg.text}")
+        """Dispatches an incoming WeChat message with user conversation thread continuity."""
+        user_id = msg.from_user_id
+        text = msg.text.strip()
+
+        # Handle conversation reset command
+        if text.lower() in ["/reset", "/new", "/clear", "新对话", "重置会话"]:
+            self.config.reset_conversation(user_id)
+            logger.info(f"Reset conversation thread for user [{user_id}]")
+            self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话上下文！")
+            return
+
+        logger.info(f"Incoming message from [{user_id}]: {text}")
         
-        # 1. Send typing status
-        self.client.send_typing(msg.from_user_id, typing=True)
+        # 1. Look up existing thread / conversation_id for this user
+        conv_id = self.config.get_conversation_id(user_id)
+        if conv_id:
+            logger.info(f"Continuing thread [{conv_id}] for user [{user_id}]")
+        else:
+            logger.info(f"Starting new thread for user [{user_id}]")
 
-        # 2. Execute via Antigravity SDK
+        # 2. Send typing status
+        self.client.send_typing(user_id, typing=True)
+
+        # 3. Execute via Antigravity with conversation ID
         start_t = time.time()
-        reply_text = await self.agent.execute(msg.text)
+        reply_text, new_conv_id = await self.agent.execute(text, conversation_id=conv_id)
         elapsed = time.time() - start_t
-        logger.info(f"Antigravity reply generated in {elapsed:.2f}s for [{msg.from_user_id}]")
+        logger.info(f"Antigravity reply generated in {elapsed:.2f}s (conv={new_conv_id}) for [{user_id}]")
 
-        # 3. Cancel typing & send reply
-        self.client.send_typing(msg.from_user_id, typing=False)
-        self.client.send_message(msg.from_user_id, msg.context_token, reply_text)
+        # 4. Save updated thread ID
+        if new_conv_id:
+            self.config.set_conversation_id(user_id, new_conv_id)
+
+        # 5. Cancel typing & send reply
+        self.client.send_typing(user_id, typing=False)
+        self.client.send_message(user_id, msg.context_token, reply_text)
 
     async def poll_loop(self):
         """Long-polling main event loop."""

@@ -9,7 +9,7 @@ import json
 import base64
 import random
 from pathlib import Path
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field
 from typing import Optional, Dict, Any
 
 
@@ -33,6 +33,7 @@ class SidecarConfig:
         "Keep code blocks clear and avoid unnecessary preamble."
     )
     enable_write_tools: bool = True
+    user_conversations: Dict[str, str] = field(default_factory=dict)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
     @classmethod
@@ -58,6 +59,7 @@ class SidecarConfig:
                 bot_agent=data.get("bot_agent", DEFAULT_BOT_AGENT),
                 system_instructions=data.get("system_instructions", ""),
                 enable_write_tools=data.get("enable_write_tools", True),
+                user_conversations=data.get("user_conversations", {}),
                 config_path=config_file
             )
             instance._ensure_uin()
@@ -83,10 +85,23 @@ class SidecarConfig:
             "login_time": self.login_time,
             "ilink_base_url": self.ilink_base_url,
             "bot_agent": self.bot_agent,
-            "enable_write_tools": self.enable_write_tools
+            "enable_write_tools": self.enable_write_tools,
+            "user_conversations": self.user_conversations
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
+
+    def get_conversation_id(self, user_id: str) -> Optional[str]:
+        return self.user_conversations.get(user_id)
+
+    def set_conversation_id(self, user_id: str, conv_id: str):
+        self.user_conversations[user_id] = conv_id
+        self.save()
+
+    def reset_conversation(self, user_id: str):
+        if user_id in self.user_conversations:
+            del self.user_conversations[user_id]
+            self.save()
 
     def get_auth_headers(self) -> Dict[str, str]:
         self._ensure_uin()
