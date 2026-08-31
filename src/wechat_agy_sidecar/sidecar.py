@@ -1,6 +1,6 @@
 """
 WeChat Antigravity Sidecar Orchestrator & Daemon.
-Handles persistent user conversation threading.
+Handles persistent user conversation threading and /new command routing.
 """
 
 from __future__ import annotations
@@ -69,21 +69,43 @@ class WeChatSidecar:
         return False
 
     async def handle_message(self, msg: InboundMessage):
-        """Dispatches an incoming WeChat message with user conversation thread continuity."""
+        """
+        Dispatches an incoming WeChat message with user conversation thread continuity.
+        Supports:
+          - '/new' or '/reset' -> resets thread and replies with confirmation
+          - '/new <prompt>' -> resets thread and immediately executes prompt in new thread
+        """
         user_id = msg.from_user_id
         text = msg.text.strip()
+        force_new_thread = False
+        actual_prompt = text
 
-        # Handle conversation reset command
-        if text.lower() in ["/reset", "/new", "/clear", "新对话", "重置会话"]:
-            self.config.reset_conversation(user_id)
-            logger.info(f"Reset conversation thread for user [{user_id}]")
-            self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话上下文！")
+        # Parse command prefixes: /new, /reset, /clear
+        for cmd_prefix in ["/new", "/reset", "/clear"]:
+            if text.lower() == cmd_prefix or text in ["新对话", "重置会话"]:
+                self.config.reset_conversation(user_id)
+                logger.info(f"Reset conversation thread for user [{user_id}]")
+                self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话线程！请输入你的问题：")
+                return
+            elif text.lower().startswith(f"{cmd_prefix} ") or text.lower().startswith(f"{cmd_prefix}：") or text.lower().startswith(f"{cmd_prefix}:"):
+                force_new_thread = True
+                # Remove prefix
+                sep_idx = text.find(" ")
+                if sep_idx == -1:
+                    sep_idx = max(text.find("："), text.find(":"))
+                actual_prompt = text[sep_idx + 1:].strip()
+                self.config.reset_conversation(user_id)
+                logger.info(f"Resetting thread and executing prompt for user [{user_id}]: {actual_prompt}")
+                break
+
+        if not actual_prompt:
+            self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话线程！请输入你的问题：")
             return
 
-        logger.info(f"Incoming message from [{user_id}]: {text}")
+        logger.info(f"Incoming message from [{user_id}]: {actual_prompt} (force_new={force_new_thread})")
         
-        # 1. Look up existing thread / conversation_id for this user
-        conv_id = self.config.get_conversation_id(user_id)
+        # 1. Determine conversation ID for this user
+        conv_id = None if force_new_thread else self.config.get_conversation_id(user_id)
         if conv_id:
             logger.info(f"Continuing thread [{conv_id}] for user [{user_id}]")
         else:
@@ -94,7 +116,7 @@ class WeChatSidecar:
 
         # 3. Execute via Antigravity with conversation ID
         start_t = time.time()
-        reply_text, new_conv_id = await self.agent.execute(text, conversation_id=conv_id)
+        reply_text, new_conv_id = await self.agent.execute(actual_prompt, conversation_id=conv_id)
         elapsed = time.time() - start_t
         logger.info(f"Antigravity reply generated in {elapsed:.2f}s (conv={new_conv_id}) for [{user_id}]")
 

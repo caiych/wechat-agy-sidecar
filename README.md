@@ -4,9 +4,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-A lightweight, robust sidecar daemon that connects **WeChat** directly with the **Google Antigravity Python SDK (`google-antigravity`)**.
+A lightweight, robust sidecar daemon that connects **WeChat** directly with **Google Antigravity** (taps into ambient logged-in AGY instance or Python SDK).
 
-It implements the native WeChat **iLink Bot Protocol** (the exact same protocol utilized by OpenClaw's official WeChat channel) without requiring the full OpenClaw agent stack, enabling personal WeChat accounts to interact with Google Antigravity.
+It implements the native WeChat **iLink Bot Protocol** (the exact same protocol utilized by OpenClaw's official WeChat channel) without requiring the full OpenClaw agent stack.
 
 ---
 
@@ -17,14 +17,14 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 |                   | <-------------------------------------------- |  WeChat Antigravity Sidecar       |
 |  WeChat iLink API |                                               |  (wechat-agy-sidecar)             |
 | (ilinkai.weixin)  | --------------------------------------------> |  - Inbound Parser (msgs/item_list)|
-|                   |        HTTP POST (/sendmessage)               |  - Session & Cursor Management    |
+|                   |        HTTP POST (/sendmessage)               |  - Multi-Turn Thread Manager      |
 +-------------------+ <-------------------------------------------- +-----------------+-----------------+
                                                                                       |
-                                                                                      | google.antigravity SDK
+                                                                                      | Active AGY Instance / SDK
                                                                                       v
                                                                     +-----------------------------------+
-                                                                    |     Google Antigravity Agent      |
-                                                                    |    (google.antigravity.Agent)     |
+                                                                    |     Google Antigravity Engine     |
+                                                                    |      (agy CLI / Python SDK)       |
                                                                     +-----------------------------------+
 ```
 
@@ -32,12 +32,15 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 
 ## ✨ Features
 
-- **Native Protocol Fidelity**: Implements the Tencent iLink Bot API (`ilink_bot_token`, `bot_agent`, `X-WECHAT-UIN`).
+- **Multi-Turn Persistent Threading**: Automatically preserves multi-turn conversation context per WeChat user across messages and daemon restarts.
+- **Thread Control Commands**:
+  - `/new` (or `/reset`): Resets the conversation thread and starts fresh.
+  - `/new <prompt>` (or `/reset <prompt>`): Resets the conversation thread and immediately executes `<prompt>` in the new thread.
+- **Native Protocol Fidelity**: Implements the Tencent iLink Bot API (`ilink_bot_token`, `bot_agent`, `X-WECHAT-UIN`, `message_state: 2`).
 - **Interactive QR Onboarding**: Displays an in-terminal ASCII QR code on initial launch for seamless zero-config WeChat authorization.
-- **Pure SDK Driven**: Directly interfaces with `google-antigravity` via the official Python async context manager without subprocess wrappers.
-- **Incremental Cursor Sync**: Persists `get_updates_buf` to ensure zero message loss and no duplicate responses across restarts.
+- **Ambient AGY Instance Integration**: Seamlessly taps into the logged-in local AGY instance (OAuth / personal login) with zero required API keys.
+- **Incremental Cursor Sync**: Persists `get_updates_buf` to ensure zero message loss and no duplicate responses.
 - **Typing Indicator**: Automatically sends `sendtyping` events while Antigravity generates code and reasoning steps.
-- **Context Routing**: Maintains conversation context via WeChat `context_token` propagation.
 
 ---
 
@@ -49,7 +52,7 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 git clone https://github.com/caiych/wechat-agy-sidecar.git
 cd wechat-agy-sidecar
 
-# Install with pip / uv
+# Install with uv / pip
 pip install -e .
 ```
 
@@ -65,7 +68,7 @@ pip install -r requirements.txt
 
 ### 1. One-Time Onboarding (QR Login)
 
-Run the daemon in onboarding mode or start it directly (it will automatically prompt for login if no saved session is found):
+Run the daemon in onboarding mode or start it directly:
 
 ```bash
 # Start the sidecar
@@ -91,26 +94,22 @@ nohup wechat-agy-sidecar > ~/.gemini/wechat_sidecar.log 2>&1 &
 
 ---
 
-## ⚙️ Configuration
+## 💬 WeChat Interactive Commands
 
-Configurations can be customized via CLI flags, environment variables, or by editing `~/.gemini/wechat_sidecar_config.json`:
-
-| Parameter | Environment Variable / Flag | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `config_path` | `--config` / `WECHAT_SIDECAR_CONFIG` | `~/.gemini/wechat_sidecar_config.json` | Path to credentials and cursor store. |
-| `system_instructions` | `--system-prompt` | Markdown coding assistant | System instructions passed to Antigravity Agent. |
-| `enable_write_tools` | Config file | `true` | Enables Antigravity write capabilities (`run_command`, etc.). |
+| Command | Action | Example |
+| :--- | :--- | :--- |
+| *(Any text)* | Continues the active multi-turn conversation thread. | `帮我把刚才的函数改成异步版本` |
+| `/new` | Resets conversation thread and waits for new input. | `/new` |
+| `/new <prompt>` | Resets thread and immediately executes prompt in the new thread. | `/new 用 Go 写一个 HTTP 客户端` |
+| `/reset` | Alias for `/new`. | `/reset` |
 
 ---
 
 ## 🧪 Development & Testing
 
 ```bash
-# Install development dependencies
-pip install -e ".[dev]"
-
 # Run tests
-pytest
+.venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
 ---
