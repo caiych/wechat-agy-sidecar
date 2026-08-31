@@ -68,6 +68,39 @@ class AntigravityAgent:
                         return first_line[:36] + ("..." if len(first_line) > 36 else "")
         except Exception as e:
             logger.debug(f"Error extracting title for {conversation_id}: {e}")
+        return f"会话 ({conversation_id[:8]})"
+
+    def extract_last_message_preview(self, conversation_id: str, max_chars: int = 200) -> str:
+        """Extracts a preview snippet of the last meaningful message in the conversation."""
+        t_file = self._get_transcript_path(conversation_id)
+        if not t_file.exists():
+            return ""
+        try:
+            lines = t_file.read_text(encoding="utf-8").strip().splitlines()
+            for line in reversed(lines):
+                step = json.loads(line)
+                step_type = step.get("type", "")
+                content = step.get("content", "").strip()
+                if not content or step_type not in ["PLANNER_RESPONSE", "USER_INPUT"]:
+                    continue
+
+                # Remove system wrappers / metadata tags
+                import re
+                clean = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", content, flags=re.DOTALL)
+                clean = re.sub(r"<[^>]+>", "", clean).strip()
+                clean = re.sub(r"^Created At:.*?Completed At:.*?\n", "", clean, flags=re.DOTALL).strip()
+                if not clean:
+                    continue
+
+                role = "🤖 AI" if step_type == "PLANNER_RESPONSE" else "👤 用户"
+                snippet = " ".join(clean.split())
+                if len(snippet) > max_chars:
+                    snippet = snippet[:max_chars] + "..."
+                return f"{role}: {snippet}"
+        except Exception as e:
+            logger.debug(f"Error extracting last message preview for {conversation_id}: {e}")
+        return ""
+
     def list_all_recent_conversations(self, limit: int = 8) -> list[dict]:
         """
         Discovers all Antigravity conversations across IDE, CLI, and WeChat by scanning

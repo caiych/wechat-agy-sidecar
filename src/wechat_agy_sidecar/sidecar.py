@@ -122,10 +122,17 @@ class WeChatSidecar:
                 idx = int(arg) - 1
                 if 0 <= idx < len(all_recent):
                     target = all_recent[idx]
-                    self.config.set_conversation_id(user_id, target["conv_id"])
+                    target_id = target["conv_id"]
+                    self.config.set_conversation_id(user_id, target_id)
                     self.pending_resume.pop(user_id, None)
-                    title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
-                    self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
+                    title = target.get("title") or self.agent.extract_conversation_title(target_id)
+                    preview = self.agent.extract_last_message_preview(target_id, max_chars=180)
+                    preview_block = f"\n\n💬 上下文摘要:\n{preview}" if preview else ""
+                    self.client.send_message(
+                        user_id,
+                        msg.context_token,
+                        f"✅ 已成功切换至会话 #{idx + 1}: {title}\n(ID: {target_id[:8]}...){preview_block}\n\n👉 接下来发送的消息将继续该会话。"
+                    )
                     return
                 else:
                     self.client.send_message(user_id, msg.context_token, f"❌ 序号无效，请输入 1 到 {len(all_recent)} 之间的数字。")
@@ -135,7 +142,13 @@ class WeChatSidecar:
                 self.pending_resume.pop(user_id, None)
                 title = self.agent.extract_conversation_title(arg)
                 self.config.record_conversation(user_id, arg, title)
-                self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至指定会话: {title} (ID: {arg[:8]}...)\n接下来发送的消息将继续该会话。")
+                preview = self.agent.extract_last_message_preview(arg, max_chars=180)
+                preview_block = f"\n\n💬 上下文摘要:\n{preview}" if preview else ""
+                self.client.send_message(
+                    user_id,
+                    msg.context_token,
+                    f"✅ 已成功切换至指定会话: {title}\n(ID: {arg[:8]}...){preview_block}\n\n👉 接下来发送的消息将继续该会话。"
+                )
                 return
 
         # Numeric selection from pending /resume menu
@@ -144,10 +157,17 @@ class WeChatSidecar:
             idx = int(text) - 1
             if 0 <= idx < len(all_recent):
                 target = all_recent[idx]
-                self.config.set_conversation_id(user_id, target["conv_id"])
+                target_id = target["conv_id"]
+                self.config.set_conversation_id(user_id, target_id)
                 del self.pending_resume[user_id]
-                title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
-                self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
+                title = target.get("title") or self.agent.extract_conversation_title(target_id)
+                preview = self.agent.extract_last_message_preview(target_id, max_chars=180)
+                preview_block = f"\n\n💬 上下文摘要:\n{preview}" if preview else ""
+                self.client.send_message(
+                    user_id,
+                    msg.context_token,
+                    f"✅ 已成功切换至会话 #{idx + 1}: {title}\n(ID: {target_id[:8]}...){preview_block}\n\n👉 接下来发送的消息将继续该会话。"
+                )
                 return
 
         # 2. Parse command prefixes: /new, /reset, /clear
