@@ -147,13 +147,37 @@ class WeChatIlinkClient:
                 from_user = str(item.get("from_user_id") or item.get("from_user") or "")
                 context_token = str(item.get("context_token") or "")
                 
-                # Extract text content from item_list
+                # Extract content from item_list (text, image, voice, file, video)
                 text = ""
                 item_list = item.get("item_list", [])
+                has_media = False
                 for sub_item in item_list:
+                    item_type = sub_item.get("type")
                     text_item = sub_item.get("text_item", {})
-                    if text_item and "text" in text_item:
-                        text += text_item["text"] + "\n"
+                    image_item = sub_item.get("image_item", {})
+                    file_item = sub_item.get("file_item", {})
+                    voice_item = sub_item.get("voice_item", {})
+                    video_item = sub_item.get("video_item", {})
+
+                    if item_type == 1 or (text_item and "text" in text_item):
+                        text += (text_item.get("text") or sub_item.get("text", "")) + "\n"
+                    elif item_type == 2 or image_item:
+                        has_media = True
+                        logger.info(f"Received Image attachment: {image_item}")
+                        text += "[用户发送了一张图片 (Image)]\n"
+                    elif item_type == 3 or voice_item:
+                        has_media = True
+                        logger.info(f"Received Voice message: {voice_item}")
+                        text += "[用户发送了一条语音消息 (Voice)]\n"
+                    elif item_type == 4 or file_item:
+                        has_media = True
+                        file_name = file_item.get("file_name", "未知文件")
+                        logger.info(f"Received File attachment: {file_name}")
+                        text += f"[用户发送了一个文件: {file_name}]\n"
+                    elif item_type == 5 or video_item:
+                        has_media = True
+                        logger.info(f"Received Video attachment: {video_item}")
+                        text += "[用户发送了一个视频 (Video)]\n"
                     elif "text" in sub_item:
                         text += str(sub_item["text"]) + "\n"
 
@@ -168,13 +192,13 @@ class WeChatIlinkClient:
                         text = str(item["text"])
 
                 text = text.strip()
-                if text and from_user:
+                if (text or has_media) and from_user:
                     inbound_list.append(
                         InboundMessage(
                             msg_id=msg_id,
                             from_user_id=from_user,
                             context_token=context_token,
-                            text=text,
+                            text=text or "[用户发送了一条多媒体消息]",
                             raw_payload=item
                         )
                     )
