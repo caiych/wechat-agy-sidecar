@@ -4,6 +4,7 @@ Unit tests for AntigravityAgent execution bridge, transcript parsing, and brain 
 
 from __future__ import annotations
 
+import os
 import tempfile
 import time
 import unittest
@@ -102,6 +103,22 @@ class TestAntigravityAgent(unittest.IsolatedAsyncioTestCase):
             inv = self.mock_api.invocations[0]
             self.assertEqual(inv["cmd"], ["/mock/bin/agentapi", "send-message", conv_id, "Second turn follow-up"])
 
+    def test_prepare_agentapi_env_strips_parent_scoping(self):
+        with patch.dict(os.environ, {
+            "ANTIGRAVITY_CONVERSATION_ID": "parent-conv-123",
+            "ANTIGRAVITY_PROJECT_ID": "parent-proj-456",
+            "ANTIGRAVITY_SOURCE_METADATA": '{"tool": "call"}',
+            "ANTIGRAVITY_TRAJECTORY_ID": "traj-789",
+            "CUSTOM_VAR": "keep_me"
+        }):
+            clean_env = self.agent._prepare_agentapi_env()
+            self.assertNotIn("ANTIGRAVITY_CONVERSATION_ID", clean_env)
+            self.assertNotIn("ANTIGRAVITY_SOURCE_METADATA", clean_env)
+            self.assertNotIn("ANTIGRAVITY_TRAJECTORY_ID", clean_env)
+            self.assertEqual(clean_env.get("CUSTOM_VAR"), "keep_me")
+            self.assertEqual(clean_env.get("AGENTAPI_PROJECT_ID"), "test-project-123")
+            self.assertEqual(clean_env.get("ANTIGRAVITY_PROJECT_ID"), "test-project-123")
+
     async def test_execute_send_message_failure_fallback_to_new(self):
         conv_id = "non-existent-conv-id"
         self.mock_api.fail_next = True
@@ -113,6 +130,7 @@ class TestAntigravityAgent(unittest.IsolatedAsyncioTestCase):
             self.assertIsNotNone(returned_id)
             self.assertNotEqual(returned_id, conv_id)
             self.assertIn("Echo from Antigravity: Fallback test prompt", reply)
+
 
 
 if __name__ == "__main__":

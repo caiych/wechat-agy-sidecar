@@ -186,6 +186,25 @@ class AntigravityAgent:
 
         return last_content or "（Antigravity 已处理该请求）"
 
+    def _prepare_agentapi_env(self) -> dict:
+        """Constructs a clean environment for agentapi child process, stripping parent caller scoping."""
+        env = os.environ.copy()
+        for var in [
+            "ANTIGRAVITY_CONVERSATION_ID",
+            "ANTIGRAVITY_SOURCE_METADATA",
+            "ANTIGRAVITY_TRAJECTORY_ID",
+            "ANTIGRAVITY_PROJECT_ID",
+            "AGENTAPI_PROJECT_ID",
+        ]:
+            env.pop(var, None)
+
+        project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+        if project_id:
+            env["AGENTAPI_PROJECT_ID"] = project_id
+            env["ANTIGRAVITY_PROJECT_ID"] = project_id
+            logger.info(f"Using project ID: {project_id}")
+        return env
+
     async def execute(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """
         Executes a user prompt using agentapi.
@@ -200,12 +219,7 @@ class AntigravityAgent:
                 start_line = self._count_transcript_lines(conversation_id)
                 logger.info(f"Sending message to conversation {conversation_id} via agentapi...")
                 cmd = [self.agentapi_bin, "send-message", conversation_id, prompt]
-
-                env = os.environ.copy()
-                project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
-                if project_id:
-                    env["AGENTAPI_PROJECT_ID"] = project_id
-                    logger.info(f"Using project ID: {project_id}")
+                env = self._prepare_agentapi_env()
 
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
@@ -235,13 +249,7 @@ class AntigravityAgent:
         """
         logger.info("Creating new conversation via agentapi...")
         cmd = [self.agentapi_bin, "new-conversation", prompt]
-
-        env = os.environ.copy()
-        # Inject project ID from config or environment
-        project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
-        if project_id:
-            env["AGENTAPI_PROJECT_ID"] = project_id
-            logger.info(f"Using project ID: {project_id}")
+        env = self._prepare_agentapi_env()
 
         proc = await asyncio.create_subprocess_exec(
             *cmd,
@@ -249,6 +257,7 @@ class AntigravityAgent:
             stderr=asyncio.subprocess.PIPE,
             env=env
         )
+
         stdout, stderr = await proc.communicate()
         out_str = stdout.decode("utf-8", errors="replace").strip()
 
