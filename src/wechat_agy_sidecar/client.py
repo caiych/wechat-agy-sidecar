@@ -5,15 +5,15 @@ Implements the exact protocol utilized by OpenClaw's WeChat channel.
 
 from __future__ import annotations
 
-import time
-import json
-import random
 import logging
+import random
+import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
 from wechat_agy_sidecar.config import SidecarConfig
 
 logger = logging.getLogger("wechat_agy_sidecar.client")
@@ -87,7 +87,7 @@ class WeChatIlinkClient:
             if resp.status_code != 200:
                 logger.error(f"get_bot_qrcode failed with HTTP {resp.status_code}: {resp.text}")
                 return False, None, None
-            
+
             data = resp.json()
             qrcode_id = data.get("qrcode") or data.get("qrcode_id")
             qrcode_render_url = data.get("qrcode_img_content") or data.get("qrcode_img_url") or qrcode_id
@@ -140,13 +140,13 @@ class WeChatIlinkClient:
             data = resp.json()
             new_cursor = data.get("get_updates_buf") or self.config.get_updates_buf
             raw_msgs = data.get("msgs") or data.get("messages") or []
-            
+
             inbound_list: List[InboundMessage] = []
             for item in raw_msgs:
                 msg_id = str(item.get("msg_id") or item.get("id") or "")
                 from_user = str(item.get("from_user_id") or item.get("from_user") or "")
                 context_token = str(item.get("context_token") or "")
-                
+
                 # Extract content from item_list (text, image, voice, file, video)
                 text = ""
                 item_list = item.get("item_list", [])

@@ -4,15 +4,14 @@ Configuration management for the WeChat Antigravity Sidecar.
 
 from __future__ import annotations
 
-import os
-import json
 import base64
+import json
+import os
 import random
 import time
-from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
-
+from pathlib import Path
+from typing import Dict, Optional
 
 DEFAULT_CONFIG_PATH = Path.home() / ".gemini" / "wechat_sidecar_config.json"
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"

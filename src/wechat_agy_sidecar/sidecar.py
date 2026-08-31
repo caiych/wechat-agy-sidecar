@@ -6,18 +6,17 @@ permission request cards, and proactive background event streaming via agentapi 
 
 from __future__ import annotations
 
-import os
-import json
-import time
-import signal
 import asyncio
+import json
 import logging
+import signal
+import time
 from pathlib import Path
-from typing import Optional, Dict, List, Set
+from typing import Dict, List, Optional
 
-from wechat_agy_sidecar.config import SidecarConfig
-from wechat_agy_sidecar.client import WeChatIlinkClient, InboundMessage, TerminalQR
 from wechat_agy_sidecar.agent import AntigravityAgent
+from wechat_agy_sidecar.client import InboundMessage, TerminalQR, WeChatIlinkClient
+from wechat_agy_sidecar.config import SidecarConfig
 
 logger = logging.getLogger("wechat_agy_sidecar.daemon")
 
@@ -193,7 +192,7 @@ class WeChatSidecar:
             return
 
         logger.info(f"Incoming message from [{user_id}]: {actual_prompt[:60]} (force_new={force_new_thread})")
-        
+
         # 3. Determine conversation ID for this user
         conv_id = None if force_new_thread else self.config.get_conversation_id(user_id)
         if conv_id:
@@ -255,7 +254,6 @@ class WeChatSidecar:
                         for line in lines[last_seen:]:
                             try:
                                 step = json.loads(line)
-                                step_idx = step.get("step_index", 0)
                                 step_type = step.get("type", "")
 
                                 # Proactive text output (timers, scheduled tasks, background subagents)
@@ -292,7 +290,7 @@ class WeChatSidecar:
         while self.running:
             try:
                 result = await loop.run_in_executor(None, lambda: self.client.get_updates(timeout=35))
-                
+
                 if result.status_code == 401:
                     logger.warning("Session token unauthorized (401). Triggering onboarding...")
                     if self.run_onboarding_login():

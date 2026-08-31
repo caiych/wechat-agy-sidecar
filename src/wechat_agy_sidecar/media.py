@@ -5,16 +5,16 @@ Handles AES-128-ECB CDN payload decryption for inbound images, audio (Silk v3), 
 
 from __future__ import annotations
 
-import time
-import json
 import base64
+import json
 import logging
+import time
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Any, Dict, Optional
 
 import requests
-from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 logger = logging.getLogger("wechat_agy_sidecar.media")
 

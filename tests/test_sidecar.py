@@ -2,12 +2,13 @@
 Unit tests for WeChat Antigravity Sidecar configuration, client protocol, media registry, and threading.
 """
 
-import unittest
 import tempfile
+import unittest
 from pathlib import Path
-from wechat_agy_sidecar.config import SidecarConfig
+
 from wechat_agy_sidecar.client import InboundMessage
-from wechat_agy_sidecar.media import register_media, lookup_media, MEDIA_DIR
+from wechat_agy_sidecar.config import SidecarConfig
+from wechat_agy_sidecar.media import lookup_media, register_media
 
 
 class TestWeChatSidecar(unittest.TestCase):
@@ -33,7 +34,7 @@ class TestWeChatSidecar(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_file = Path(tmpdir) / "test_config.json"
             cfg = SidecarConfig.load(cfg_file)
-            
+
             user_a = "user_wx_1"
             conv_id_1 = "conv-uuid-12345"
             cfg.set_conversation_id(user_a, conv_id_1)

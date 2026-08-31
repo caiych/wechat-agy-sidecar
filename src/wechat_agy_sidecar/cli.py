@@ -5,15 +5,14 @@ Supports daemon execution and media downloading/decryption.
 
 from __future__ import annotations
 
-import sys
-import logging
 import argparse
+import logging
+import sys
 from pathlib import Path
 
 from wechat_agy_sidecar import __version__
 from wechat_agy_sidecar.config import SidecarConfig
 from wechat_agy_sidecar.sidecar import WeChatSidecar
-from wechat_agy_sidecar.media import download_and_decrypt_media
 
 
 def main():
@@ -75,11 +74,14 @@ def main():
     if args.subcommand == "download-media":
         if args.media_id:
             # Registry-based lookup
-            from wechat_agy_sidecar.media import lookup_media, download_and_decrypt_media
+            from wechat_agy_sidecar.media import (
+                download_and_decrypt_media,
+                lookup_media,
+            )
             entry = lookup_media(args.media_id)
             if not entry:
                 print(f"❌ Media ID '{args.media_id}' not found in registry.", file=sys.stderr)
-                print(f"Available IDs can be found in: ~/.gemini/wechat_media/registry.json", file=sys.stderr)
+                print("Available IDs can be found in: ~/.gemini/wechat_media/registry.json", file=sys.stderr)
                 sys.exit(1)
             print(f"Resolved media ID '{args.media_id}': type={entry.get('type')}, registered_at={entry.get('registered_at')}")
             url = entry["url"]

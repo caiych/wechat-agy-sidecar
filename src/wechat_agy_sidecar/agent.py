@@ -6,12 +6,12 @@ and background event/timer streaming.
 
 from __future__ import annotations
 
-import os
-import json
-import time
-import shutil
 import asyncio
+import json
 import logging
+import os
+import shutil
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -197,7 +197,7 @@ class AntigravityAgent:
                 start_line = self._count_transcript_lines(conversation_id)
                 logger.info(f"Sending message to conversation {conversation_id} via agentapi...")
                 cmd = [self.agentapi_bin, "send-message", conversation_id, prompt]
-                
+
                 env = os.environ.copy()
                 project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
                 if project_id:
@@ -224,7 +224,7 @@ class AntigravityAgent:
 
         except Exception as e:
             logger.error(f"Failed to execute agentapi: {e}", exc_info=True)
-            return f"❌ [Antigravity 执行异常]\n{str(e)}", conversation_id
+            return f"❌ [Antigravity 执行异常]\n{e!s}", conversation_id
 
     async def _create_new_conversation(self, prompt: str) -> Tuple[str, Optional[str]]:
         """
@@ -232,14 +232,14 @@ class AntigravityAgent:
         """
         logger.info("Creating new conversation via agentapi...")
         cmd = [self.agentapi_bin, "new-conversation", prompt]
-        
+
         env = os.environ.copy()
         # Inject project ID from config or environment
         project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
         if project_id:
             env["AGENTAPI_PROJECT_ID"] = project_id
             logger.info(f"Using project ID: {project_id}")
-        
+
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
