@@ -68,7 +68,44 @@ class AntigravityAgent:
                         return first_line[:36] + ("..." if len(first_line) > 36 else "")
         except Exception as e:
             logger.debug(f"Error extracting title for {conversation_id}: {e}")
-        return f"会话 ({conversation_id[:8]})"
+    def list_all_recent_conversations(self, limit: int = 8) -> list[dict]:
+        """
+        Discovers all Antigravity conversations across IDE, CLI, and WeChat by scanning
+        the ambient brain directory, sorted by most recent activity timestamp.
+        """
+        if not BRAIN_DIR.exists():
+            return []
+
+        conv_candidates = []
+        try:
+            for item in BRAIN_DIR.iterdir():
+                if not item.is_dir() or item.name.startswith("."):
+                    continue
+                t_file = item / ".system_generated" / "logs" / "transcript.jsonl"
+                if not t_file.exists():
+                    continue
+                try:
+                    mtime = t_file.stat().st_mtime
+                    conv_candidates.append((mtime, item.name))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"Error scanning brain directory: {e}")
+            return []
+
+        conv_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        results = []
+        for mtime, c_id in conv_candidates:
+            title = self.extract_conversation_title(c_id)
+            results.append({
+                "conv_id": c_id,
+                "title": title,
+                "updated_at": int(mtime)
+            })
+            if len(results) >= limit:
+                break
+        return results
 
     def _count_transcript_lines(self, conversation_id: str) -> int:
         t_file = self._get_transcript_path(conversation_id)

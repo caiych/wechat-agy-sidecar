@@ -93,24 +93,21 @@ class WeChatSidecar:
 
         # 1. Handle /resume command variations
         if text.lower() in ["/resume", "/history", "/list", "恢复会话", "切换会话", "历史会话"]:
-            recent = self.config.get_recent_conversations(user_id, n=5)
+            # Discover all conversations across IDE, CLI, and WeChat
+            all_recent = self.agent.list_all_recent_conversations(limit=8)
             curr_id = self.config.get_conversation_id(user_id)
-            if not recent and curr_id:
-                title = self.agent.extract_conversation_title(curr_id)
-                self.config.record_conversation(user_id, curr_id, title)
-                recent = self.config.get_recent_conversations(user_id, n=5)
 
-            if not recent:
-                self.client.send_message(user_id, msg.context_token, "📋 暂无历史会话记录。\n输入你的问题或发送 /new 开始新对话！")
+            if not all_recent:
+                self.client.send_message(user_id, msg.context_token, "📋 暂未发现 Antigravity 会话记录。\n输入你的问题或发送 /new 开始新对话！")
                 return
 
-            self.pending_resume[user_id] = recent
-            reply_lines = ["📋 [最近的 Antigravity 会话列表]"]
-            for idx, item in enumerate(recent, 1):
+            self.pending_resume[user_id] = all_recent
+            reply_lines = ["📋 [最近的 Antigravity 会话列表 (包含 IDE/CLI/微信)]"]
+            for idx, item in enumerate(all_recent, 1):
                 c_id = item.get("conv_id", "")
-                t_str = time.strftime("%m-%d %H:%M", time.localtime(item.get("created_at", time.time())))
+                t_str = time.strftime("%m-%d %H:%M", time.localtime(item.get("updated_at", time.time())))
                 title = item.get("title") or self.agent.extract_conversation_title(c_id)
-                active_mark = " ⭐ [当前会话]" if c_id == curr_id else ""
+                active_mark = " ⭐ [当前]" if c_id == curr_id else ""
                 reply_lines.append(f"{idx}. {t_str} | {title}{active_mark}")
 
             reply_lines.append("\n👉 请直接回复序号（如 1 或 2）切换会话，或回复 \"/resume 1\"。")
@@ -120,18 +117,18 @@ class WeChatSidecar:
         # Direct /resume <arg> command
         if text.lower().startswith("/resume ") or text.lower().startswith("/resume:") or text.lower().startswith("/resume："):
             arg = text.split(None, 1)[1].strip() if " " in text else text[8:].strip()
-            recent = self.config.get_recent_conversations(user_id, n=10)
+            all_recent = self.agent.list_all_recent_conversations(limit=10)
             if arg.isdigit():
                 idx = int(arg) - 1
-                if 0 <= idx < len(recent):
-                    target = recent[idx]
+                if 0 <= idx < len(all_recent):
+                    target = all_recent[idx]
                     self.config.set_conversation_id(user_id, target["conv_id"])
                     self.pending_resume.pop(user_id, None)
                     title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
                     self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
                     return
                 else:
-                    self.client.send_message(user_id, msg.context_token, f"❌ 序号无效，请输入 1 到 {len(recent)} 之间的数字。")
+                    self.client.send_message(user_id, msg.context_token, f"❌ 序号无效，请输入 1 到 {len(all_recent)} 之间的数字。")
                     return
             elif arg:
                 self.config.set_conversation_id(user_id, arg)
@@ -143,14 +140,14 @@ class WeChatSidecar:
 
         # Numeric selection from pending /resume menu
         if user_id in self.pending_resume and text.isdigit():
-            recent = self.pending_resume[user_id]
+            all_recent = self.pending_resume[user_id]
             idx = int(text) - 1
-            if 0 <= idx < len(recent):
-                target = recent[idx]
+            if 0 <= idx < len(all_recent):
+                target = all_recent[idx]
                 self.config.set_conversation_id(user_id, target["conv_id"])
                 del self.pending_resume[user_id]
                 title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
-                self.client.send_message(user_id, msg.context_token, f"✅ 已切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
+                self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
                 return
 
         # 2. Parse command prefixes: /new, /reset, /clear
