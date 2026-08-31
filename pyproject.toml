@@ -27,7 +27,8 @@ classifiers = [
 dependencies = [
     "google-antigravity",
     "requests>=2.28.0",
-    "qrcode[pil]>=7.4.2"
+    "qrcode[pil]>=7.4.2",
+    "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]

@@ -164,7 +164,12 @@ class WeChatIlinkClient:
                     elif item_type == 2 or image_item:
                         has_media = True
                         logger.info(f"Received Image attachment: {image_item}")
-                        text += "[用户发送了一张图片 (Image)]\n"
+                        from wechat_agy_sidecar.media import decrypt_and_save_media
+                        saved_path = decrypt_and_save_media(image_item, msg_id)
+                        if saved_path:
+                            text += f"[用户发送了一张图片，已解密保存至本地文件: file://{saved_path.resolve()}]\n请分析并查看此图片内容。\n"
+                        else:
+                            text += "[用户发送了一张图片 (Image)]\n"
                     elif item_type == 3 or voice_item:
                         has_media = True
                         logger.info(f"Received Voice message: {voice_item}")
