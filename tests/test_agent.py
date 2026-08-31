@@ -1,137 +1,305 @@
 """
-Unit tests for AntigravityAgent execution bridge, transcript parsing, and brain workspace integration.
+Unit tests for AntigravityAgent in wechat_agy_sidecar.agent.
 """
 
 from __future__ import annotations
 
-import os
-import tempfile
+import asyncio
+import json
 import time
-import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from tests.mocks.mock_agentapi import MockAgentApi, MockBrainWorkspace
-from wechat_agy_sidecar import agent
+import pytest
+
+from tests.conftest import FakeProcess
 from wechat_agy_sidecar.agent import AntigravityAgent
-from wechat_agy_sidecar.config import SidecarConfig
 
 
-class TestAntigravityAgent(unittest.IsolatedAsyncioTestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.brain_dir = Path(self.temp_dir.name) / "brain"
-        self.workspace = MockBrainWorkspace(self.brain_dir)
-        self.patcher = patch.object(agent, "BRAIN_DIR", self.brain_dir)
-        self.patcher.start()
+def test_find_agentapi_binary(mock_config, temp_dir):
+    agent = AntigravityAgent(mock_config)
 
-        self.config = SidecarConfig()
-        self.config.project_id = "test-project-123"
-        self.agent = AntigravityAgent(self.config)
-        self.agent.agentapi_bin = "/mock/bin/agentapi"
-        self.mock_api = MockAgentApi(self.workspace)
+    fake_bin = temp_dir / "fake_agentapi"
+    fake_bin.write_text("#!/bin/sh\necho ok\n", encoding="utf-8")
+    fake_bin.chmod(0o755)
 
-    def tearDown(self):
-        self.patcher.stop()
-        self.temp_dir.cleanup()
+    # 1. Test when ANTIGRAVITY_AGENTAPI_EXE is explicitly set
+    with patch.dict("os.environ", {"ANTIGRAVITY_AGENTAPI_EXE": str(fake_bin)}):
+        found = agent._find_agentapi_binary()
+        assert found == str(fake_bin)
 
-    def test_find_agentapi_binary(self):
-        with patch("shutil.which", return_value="/usr/local/bin/agentapi"), \
-             patch("os.path.isfile", return_value=True), \
-             patch("os.access", return_value=True):
-            found = self.agent._find_agentapi_binary()
-            self.assertEqual(found, "/usr/local/bin/agentapi")
+    # 2. Test when ANTIGRAVITY_AGENTAPI_EXE is empty and shutil.which finds binary
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("shutil.which", return_value=str(fake_bin)):
+        found = agent._find_agentapi_binary()
+        assert found == str(fake_bin)
 
-    def test_extract_conversation_title(self):
-        conv_id = self.workspace.create_conversation(
-            initial_prompt="<system>wrapper</system>Write a fast HTTP server in Go"
+    # 3. Test when nothing exists
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("shutil.which", return_value=None), \
+         patch("os.path.isfile", return_value=False):
+        found = agent._find_agentapi_binary()
+        assert found is None
+
+
+def test_extract_conversation_title(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    conv_id = "conv_test_title"
+
+    # Case 1: Non-existent transcript
+    assert agent.extract_conversation_title("non_existent") == "会话 (non_exis)"
+
+    # Case 2: Clean user input
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        conv_id,
+        [
+            {
+                "step_index": 0,
+                "type": "USER_INPUT",
+                "content": "<USER_REQUEST>\nImplement a REST API in Python\n</USER_REQUEST>"
+            }
+        ]
+    )
+    title = agent.extract_conversation_title(conv_id)
+    assert title == "Implement a REST API in Python"
+
+    # Case 3: Long prompt gets truncated to 36 chars + "..."
+    long_prompt = "A" * 50
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        conv_id,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": long_prompt}
+        ]
+    )
+    title_long = agent.extract_conversation_title(conv_id)
+    assert len(title_long) == 39  # 36 + '...'
+    assert title_long.endswith("...")
+
+
+def test_extract_last_message_preview(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    conv_id = "conv_test_preview"
+
+    # Case 1: Non-existent transcript
+    assert agent.extract_last_message_preview("non_existent") == ""
+
+    # Case 2: Extract last AI response
+    steps = [
+        {
+            "step_index": 0,
+            "type": "USER_INPUT",
+            "content": "What is 2+2?"
+        },
+        {
+            "step_index": 1,
+            "type": "PLANNER_RESPONSE",
+            "content": "<SYSTEM_MESSAGE>Internal metadata</SYSTEM_MESSAGE>Created At: 2026-08-31\nCompleted At: 2026-08-31\n2 + 2 equals 4.",
+            "tool_calls": []
+        }
+    ]
+    transcript_builder.create_transcript(mock_brain_dir, conv_id, steps)
+
+    preview = agent.extract_last_message_preview(conv_id)
+    assert preview == "🤖 AI: 2 + 2 equals 4."
+
+    # Case 3: Extract last user input when model hasn't responded
+    steps_user_only = [
+        {
+            "step_index": 0,
+            "type": "USER_INPUT",
+            "content": "Just asking a question."
+        }
+    ]
+    transcript_builder.create_transcript(mock_brain_dir, "conv_user_only", steps_user_only)
+    preview_user = agent.extract_last_message_preview("conv_user_only")
+    assert preview_user == "👤 用户: Just asking a question."
+
+
+def test_list_all_recent_conversations(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+
+    now = time.time()
+    # Create 3 conversations with different timestamps
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        "conv_old",
+        [{"step_index": 0, "type": "USER_INPUT", "content": "Old Conversation"}],
+        mtime=now - 200
+    )
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        "conv_mid",
+        [{"step_index": 0, "type": "USER_INPUT", "content": "Mid Conversation"}],
+        mtime=now - 100
+    )
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        "conv_new",
+        [{"step_index": 0, "type": "USER_INPUT", "content": "New Conversation"}],
+        mtime=now
+    )
+
+    convs = agent.list_all_recent_conversations(limit=2)
+    assert len(convs) == 2
+    assert convs[0]["conv_id"] == "conv_new"
+    assert convs[0]["title"] == "New Conversation"
+    assert convs[1]["conv_id"] == "conv_mid"
+    assert convs[1]["title"] == "Mid Conversation"
+
+
+@pytest.mark.asyncio
+async def test_wait_for_response(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    conv_id = "conv_test_wait"
+
+    # Step 0 is user input
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        conv_id,
+        [{"step_index": 0, "type": "USER_INPUT", "content": "Hello"}]
+    )
+
+    async def append_response_later():
+        await asyncio.sleep(0.1)
+        # Step 1 is intermediate tool call
+        transcript_builder.append_step(
+            mock_brain_dir,
+            conv_id,
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "I am thinking...", "tool_calls": [{"name": "tool_1"}]}
         )
-        title = self.agent.extract_conversation_title(conv_id)
-        self.assertEqual(title, "Write a fast HTTP server in Go")
-
-    def test_extract_last_message_preview(self):
-        conv_id = self.workspace.create_conversation(
-            initial_prompt="What is the capital of France?",
-            initial_response="The capital of France is Paris."
-        )
-        preview = self.agent.extract_last_message_preview(conv_id)
-        self.assertIn("🤖 AI:", preview)
-        self.assertIn("Paris", preview)
-
-    def test_list_all_recent_conversations(self):
-        now = time.time()
-        c1 = self.workspace.create_conversation(
-            initial_prompt="Conversation 1", initial_response="Resp 1", mtime=now - 100
-        )
-        c2 = self.workspace.create_conversation(
-            initial_prompt="Conversation 2", initial_response="Resp 2", mtime=now - 10
+        await asyncio.sleep(0.1)
+        # Step 2 is final response
+        transcript_builder.append_step(
+            mock_brain_dir,
+            conv_id,
+            {"step_index": 2, "type": "PLANNER_RESPONSE", "content": "Here is your final answer.", "tool_calls": []}
         )
 
-        recent = self.agent.list_all_recent_conversations(limit=5)
-        self.assertEqual(len(recent), 2)
-        # c2 is more recent than c1
-        self.assertEqual(recent[0]["conv_id"], c2)
-        self.assertEqual(recent[0]["title"], "Conversation 2")
-        self.assertEqual(recent[1]["conv_id"], c1)
+    asyncio.create_task(append_response_later())
 
-    async def test_execute_new_conversation(self):
-        with patch("asyncio.create_subprocess_exec", side_effect=self.mock_api.handle_exec):
-            reply, conv_id = await self.agent.execute("Please explain quantum computing")
-            self.assertIsNotNone(conv_id)
-            self.assertTrue(conv_id.startswith("mock-conv-"))
-            self.assertIn("Echo from Antigravity: Please explain quantum computing", reply)
+    reply = await agent._wait_for_response(conv_id, start_line=1, timeout=5.0)
+    assert reply == "Here is your final answer."
 
-            # Check that AGENTAPI_PROJECT_ID was passed
-            self.assertEqual(len(self.mock_api.invocations), 1)
-            inv = self.mock_api.invocations[0]
-            self.assertEqual(inv["cmd"], ["/mock/bin/agentapi", "new-conversation", "Please explain quantum computing"])
-            self.assertEqual(inv["env"].get("AGENTAPI_PROJECT_ID"), "test-project-123")
 
-    async def test_execute_continue_conversation(self):
-        conv_id = self.workspace.create_conversation(
-            initial_prompt="First turn",
-            initial_response="First reply"
+@pytest.mark.asyncio
+async def test_execute_new_conversation_success(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    agent.agentapi_bin = "/mock/bin/agentapi"
+
+    new_conv_id = "conv_uuid_new_123"
+    api_output = json.dumps({
+        "response": {
+            "newConversation": {
+                "conversationId": new_conv_id
+            }
+        }
+    })
+
+    # Prepare transcript for the new conversation
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        new_conv_id,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "New prompt"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Created new response!", "tool_calls": []}
+        ]
+    )
+
+    mock_proc = FakeProcess(returncode=0, stdout=api_output.encode("utf-8"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_subproc:
+        reply, conv_id = await agent.execute("New prompt", conversation_id=None)
+
+        assert conv_id == new_conv_id
+        assert reply == "Created new response!"
+
+        # Verify command and project ID env injection
+        mock_subproc.assert_called_once()
+        args, kwargs = mock_subproc.call_args
+        assert args == ("/mock/bin/agentapi", "new-conversation", "New prompt")
+        assert kwargs["env"]["AGENTAPI_PROJECT_ID"] == "test-project-alpha"
+
+
+@pytest.mark.asyncio
+async def test_execute_send_message_success(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    agent.agentapi_bin = "/mock/bin/agentapi"
+    conv_id = "conv_existing_456"
+
+    # Initial turn (line count = 2)
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        conv_id,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "Turn 1"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Reply 1", "tool_calls": []}
+        ]
+    )
+
+    mock_proc = FakeProcess(returncode=0, stdout=b'{"status": "ok"}')
+
+    async def append_turn_2():
+        await asyncio.sleep(0.05)
+        transcript_builder.append_step(
+            mock_brain_dir,
+            conv_id,
+            {"step_index": 2, "type": "USER_INPUT", "content": "Turn 2"}
+        )
+        transcript_builder.append_step(
+            mock_brain_dir,
+            conv_id,
+            {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "Reply 2 for multi-turn!", "tool_calls": []}
         )
 
-        with patch("asyncio.create_subprocess_exec", side_effect=self.mock_api.handle_exec):
-            reply, returned_id = await self.agent.execute("Second turn follow-up", conversation_id=conv_id)
-            self.assertEqual(returned_id, conv_id)
-            self.assertIn("Echo from Antigravity: Second turn follow-up", reply)
+    asyncio.create_task(append_turn_2())
 
-            # Verify send-message invocation
-            self.assertEqual(len(self.mock_api.invocations), 1)
-            inv = self.mock_api.invocations[0]
-            self.assertEqual(inv["cmd"], ["/mock/bin/agentapi", "send-message", conv_id, "Second turn follow-up"])
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_subproc:
+        reply, returned_conv_id = await agent.execute("Turn 2", conversation_id=conv_id)
 
-    def test_prepare_agentapi_env_strips_parent_scoping(self):
-        with patch.dict(os.environ, {
-            "ANTIGRAVITY_CONVERSATION_ID": "parent-conv-123",
-            "ANTIGRAVITY_PROJECT_ID": "parent-proj-456",
-            "ANTIGRAVITY_SOURCE_METADATA": '{"tool": "call"}',
-            "ANTIGRAVITY_TRAJECTORY_ID": "traj-789",
-            "CUSTOM_VAR": "keep_me"
-        }):
-            clean_env = self.agent._prepare_agentapi_env()
-            self.assertNotIn("ANTIGRAVITY_CONVERSATION_ID", clean_env)
-            self.assertNotIn("ANTIGRAVITY_SOURCE_METADATA", clean_env)
-            self.assertNotIn("ANTIGRAVITY_TRAJECTORY_ID", clean_env)
-            self.assertEqual(clean_env.get("CUSTOM_VAR"), "keep_me")
-            self.assertEqual(clean_env.get("AGENTAPI_PROJECT_ID"), "test-project-123")
-            self.assertEqual(clean_env.get("ANTIGRAVITY_PROJECT_ID"), "test-project-123")
+        assert returned_conv_id == conv_id
+        assert reply == "Reply 2 for multi-turn!"
 
-    async def test_execute_send_message_failure_fallback_to_new(self):
-        conv_id = "non-existent-conv-id"
-        self.mock_api.fail_next = True
-        self.mock_api.fail_stderr = "Conversation not found"
-
-        with patch("asyncio.create_subprocess_exec", side_effect=self.mock_api.handle_exec):
-            reply, returned_id = await self.agent.execute("Fallback test prompt", conversation_id=conv_id)
-            # Should have fallen back to creating a new conversation
-            self.assertIsNotNone(returned_id)
-            self.assertNotEqual(returned_id, conv_id)
-            self.assertIn("Echo from Antigravity: Fallback test prompt", reply)
+        mock_subproc.assert_called_once()
+        args, kwargs = mock_subproc.call_args
+        assert args == ("/mock/bin/agentapi", "send-message", conv_id, "Turn 2")
+        assert kwargs["env"]["AGENTAPI_PROJECT_ID"] == "test-project-alpha"
 
 
+@pytest.mark.asyncio
+async def test_execute_send_message_failure_fallback_to_new(mock_config, mock_brain_dir, transcript_builder):
+    agent = AntigravityAgent(mock_config)
+    agent.agentapi_bin = "/mock/bin/agentapi"
+    failed_conv_id = "conv_stale_789"
+    new_conv_id = "conv_fallback_999"
 
-if __name__ == "__main__":
-    unittest.main()
+    transcript_builder.create_transcript(
+        mock_brain_dir,
+        new_conv_id,
+        [
+            {"step_index": 0, "type": "USER_INPUT", "content": "Fallback prompt"},
+            {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "Fallback successful!", "tool_calls": []}
+        ]
+    )
+
+    # First call fails (send-message), second call succeeds (new-conversation)
+    fail_proc = FakeProcess(returncode=1, stderr=b"Conversation closed or not found")
+    new_proc = FakeProcess(
+        returncode=0,
+        stdout=json.dumps({"response": {"newConversation": {"conversationId": new_conv_id}}}).encode("utf-8")
+    )
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[fail_proc, new_proc]):
+        reply, returned_conv_id = await agent.execute("Fallback prompt", conversation_id=failed_conv_id)
+        assert returned_conv_id == new_conv_id
+        assert reply == "Fallback successful!"
+
+
+@pytest.mark.asyncio
+async def test_execute_missing_binary(mock_config):
+    agent = AntigravityAgent(mock_config)
+    agent.agentapi_bin = None
+
+    reply, conv_id = await agent.execute("Hello", conversation_id="conv_123")
+    assert "未找到 agentapi 可执行文件" in reply
+    assert conv_id == "conv_123"

@@ -68,6 +68,13 @@ else
     echo "⚠️ Warning: $TARGET_CLI not found after installation." >&2
 fi
 
+if [ -f "$HOME/.gemini/antigravity-cli/bin/agentapi" ]; then
+    ln -sf "$HOME/.gemini/antigravity-cli/bin/agentapi" "$USER_BIN_DIR/agentapi"
+    chmod +x "$USER_BIN_DIR/agentapi"
+    echo "🔗 Symlinked agentapi to: $USER_BIN_DIR/agentapi"
+fi
+
+
 # 5. Register Antigravity Global Sidecar Manifest
 SIDECAR_CONFIG_DIR="$HOME/.gemini/config/sidecars/wechat-agy-sidecar"
 mkdir -p "$SIDECAR_CONFIG_DIR"
@@ -83,7 +90,7 @@ cat > "$SIDECAR_CONFIG_DIR/sidecar.json" <<EOF
   "env": {
     "PATH": "$USER_BIN_DIR:/usr/local/bin:/usr/bin:/bin",
     "HOME": "$HOME",
-    "ANTIGRAVITY_AGENTAPI_EXE": "$USER_BIN_DIR/agy",
+    "ANTIGRAVITY_AGENTAPI_EXE": "$HOME/.gemini/antigravity-cli/bin/agentapi",
     "WECHAT_SIDECAR_CONFIG": "$HOME/.gemini/wechat_sidecar_config.json",
     "WECHAT_SIDECAR_PROJECT_ID": ""
   },

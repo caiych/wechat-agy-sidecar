@@ -1,151 +1,374 @@
 """
-Unit tests for WeChat iLink Client protocol, endpoint interactions, and payload handling.
+Unit tests for WeChat iLink API Client in wechat_agy_sidecar.client.
 """
 
 from __future__ import annotations
 
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import patch
+import builtins
+from unittest.mock import MagicMock, patch
 
-from tests.mocks.mock_ilink import (
-    MockIlinkAdapter,
-    create_file_message,
-    create_text_message,
-    create_video_message,
-    create_voice_message,
+import pytest
+import requests
+
+from wechat_agy_sidecar.client import (
+    TerminalQR,
+    WeChatIlinkClient,
 )
-from wechat_agy_sidecar.client import TerminalQR, WeChatIlinkClient
-from wechat_agy_sidecar.config import SidecarConfig
 
 
-class TestWeChatIlinkClient(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.config_path = Path(self.temp_dir.name) / "config.json"
-        self.config = SidecarConfig.load(self.config_path)
-        self.config.bot_token = "test_bot_token"
-        self.config.bot_id = "test_bot_id"
-        self.client = WeChatIlinkClient(self.config)
+def test_get_login_qrcode_success(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "qrcode": "qr_code_token_12345",
+        "qrcode_img_content": "https://ilinkai.weixin.qq.com/qr/render/12345"
+    }
 
-        self.mock_adapter = MockIlinkAdapter(self.config.ilink_base_url)
-        self.client.session.mount("https://", self.mock_adapter)
-        self.client.session.mount("http://", self.mock_adapter)
-
-    def tearDown(self):
-        self.temp_dir.cleanup()
-
-    def test_get_login_qrcode_success(self):
-        self.mock_adapter.qrcode_id = "qr_12345"
-        self.mock_adapter.qrcode_url = "https://ilinkai.weixin.qq.com/qr/12345"
-        ok, qrcode_id, qrcode_url = self.client.get_login_qrcode()
-        self.assertTrue(ok)
-        self.assertEqual(qrcode_id, "qr_12345")
-        self.assertEqual(qrcode_url, "https://ilinkai.weixin.qq.com/qr/12345")
-
-    def test_poll_qrcode_status_transitions(self):
-        self.mock_adapter.qrcode_status_sequence = [
-            ("waiting", {}),
-            ("scanned", {}),
-            ("confirmed", {"bot_token": "new_token_789", "bot_id": "bot_456"}),
-        ]
-        self.mock_adapter.qrcode_status_index = 0
-
-        st1, _ = self.client.poll_qrcode_status("qr_12345")
-        self.assertEqual(st1, "waiting")
-
-        st2, _ = self.client.poll_qrcode_status("qr_12345")
-        self.assertEqual(st2, "scanned")
-
-        st3, data3 = self.client.poll_qrcode_status("qr_12345")
-        self.assertEqual(st3, "confirmed")
-        self.assertEqual(data3.get("bot_token"), "new_token_789")
-
-    def test_get_updates_text_message(self):
-        msg = create_text_message("msg_001", "wx_user_a", "Hello Antigravity", "ctx_001")
-        self.mock_adapter.queue_update([msg], next_cursor="cursor_002")
-
-        res = self.client.get_updates(timeout=5)
-        self.assertEqual(res.status_code, 200)
-        self.assertEqual(res.new_cursor, "cursor_002")
-        self.assertEqual(len(res.messages), 1)
-        self.assertEqual(res.messages[0].msg_id, "msg_001")
-        self.assertEqual(res.messages[0].from_user_id, "wx_user_a")
-        self.assertEqual(res.messages[0].text, "Hello Antigravity")
-        self.assertEqual(res.messages[0].context_token, "ctx_001")
-
-    def test_get_updates_multimedia_messages(self):
-        # File and Video items
-        file_msg = create_file_message("msg_002", "wx_user_b", "report.pdf")
-        video_msg = create_video_message("msg_003", "wx_user_c")
-        self.mock_adapter.queue_update([file_msg, video_msg], next_cursor="cursor_003")
-
-        res = self.client.get_updates(timeout=5)
-        self.assertEqual(len(res.messages), 2)
-        self.assertIn("report.pdf", res.messages[0].text)
-        self.assertIn("视频", res.messages[1].text)
-
-    def test_get_updates_voice_message_with_registry(self):
-        voice_msg = create_voice_message(
-            msg_id="msg_004",
-            from_user_id="wx_user_d",
-            transcription="请帮我写一段Python代码",
-            cdn_url="https://wx.qq.com/voice/download/123",
-            aes_key="abcdef0123456789abcdef0123456789",
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_get:
+        success, qrcode_id, qrcode_url = client.get_login_qrcode()
+        assert success is True
+        assert qrcode_id == "qr_code_token_12345"
+        assert qrcode_url == "https://ilinkai.weixin.qq.com/qr/render/12345"
+        mock_get.assert_called_once_with(
+            f"{mock_config.ilink_base_url}/ilink/bot/get_bot_qrcode?bot_type=3",
+            headers={"bot_agent": mock_config.bot_agent},
+            timeout=10,
         )
-        self.mock_adapter.queue_update([voice_msg], next_cursor="cursor_004")
-
-        res = self.client.get_updates(timeout=5)
-        self.assertEqual(len(res.messages), 1)
-        inbound = res.messages[0]
-        self.assertIn("语音消息", inbound.text)
-        self.assertIn("请帮我写一段Python代码", inbound.text)
-        self.assertIn("wechat-agy-sidecar download-media", inbound.text)
-
-    def test_send_typing(self):
-        self.client.send_typing("wx_user_a", typing=True)
-        self.assertEqual(len(self.mock_adapter.sent_typing), 1)
-        self.assertEqual(self.mock_adapter.sent_typing[0]["to_user_id"], "wx_user_a")
-        self.assertTrue(self.mock_adapter.sent_typing[0]["typing"])
-
-    def test_send_message_short(self):
-        ok = self.client.send_message("wx_user_a", "ctx_001", "Antigravity response")
-        self.assertTrue(ok)
-        self.assertEqual(len(self.mock_adapter.sent_messages), 1)
-
-        sent = self.mock_adapter.sent_messages[0]["msg"]
-        self.assertEqual(sent["to_user_id"], "wx_user_a")
-        self.assertEqual(sent["context_token"], "ctx_001")
-        self.assertEqual(sent["message_type"], 2)  # BOT
-        self.assertEqual(sent["message_state"], 2)  # FINISH
-        self.assertTrue(sent["client_id"].startswith("msg_"))
-        self.assertEqual(sent["item_list"][0]["text_item"]["text"], "Antigravity response")
-
-    def test_send_message_chunking(self):
-        long_text = "A" * 3700  # Should split into 3 chunks: 1800, 1800, 100
-        ok = self.client.send_message("wx_user_a", "ctx_001", long_text)
-        self.assertTrue(ok)
-        self.assertEqual(len(self.mock_adapter.sent_messages), 3)
-        self.assertEqual(len(self.mock_adapter.sent_messages[0]["msg"]["item_list"][0]["text_item"]["text"]), 1800)
-        self.assertEqual(len(self.mock_adapter.sent_messages[1]["msg"]["item_list"][0]["text_item"]["text"]), 1800)
-        self.assertEqual(len(self.mock_adapter.sent_messages[2]["msg"]["item_list"][0]["text_item"]["text"]), 100)
-
-    def test_terminal_qr_display(self):
-        # 1. Test normal execution with qrcode module
-        try:
-            TerminalQR.display("https://example.com/qr")
-        except Exception as e:
-            self.fail(f"TerminalQR.display raised exception: {e}")
-
-        # 2. Test fallback when qrcode is not available
-        with patch.dict("sys.modules", {"qrcode": None}):
-            with patch("requests.get", return_value=type("Resp", (), {"status_code": 200, "text": "ASCII_ART"})()):
-                with patch("builtins.print") as mock_print:
-                    TerminalQR.display("https://example.com/qr")
-                    self.assertTrue(mock_print.called)
 
 
+def test_get_login_qrcode_failure(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal Server Error"
 
-if __name__ == "__main__":
-    unittest.main()
+    with patch.object(client.session, "get", return_value=mock_resp):
+        success, qrcode_id, qrcode_url = client.get_login_qrcode()
+        assert success is False
+        assert qrcode_id is None
+        assert qrcode_url is None
+
+
+def test_get_login_qrcode_exception(mock_config):
+    client = WeChatIlinkClient(mock_config)
+
+    with patch.object(client.session, "get", side_effect=requests.RequestException("Connection error")):
+        success, qrcode_id, qrcode_url = client.get_login_qrcode()
+        assert success is False
+        assert qrcode_id is None
+        assert qrcode_url is None
+
+
+@pytest.mark.parametrize(
+    "api_status, expected_status",
+    [
+        ("waiting", "waiting"),
+        ("scanned", "scanned"),
+        ("confirmed", "confirmed"),
+        ("expired", "expired"),
+    ],
+)
+def test_poll_qrcode_status_success(mock_config, api_status, expected_status):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = {
+        "status": api_status,
+        "bot_token": "token_abc" if api_status == "confirmed" else "",
+        "bot_id": "bot_123" if api_status == "confirmed" else ""
+    }
+
+    with patch.object(client.session, "get", return_value=mock_resp) as mock_get:
+        status, data = client.poll_qrcode_status("qr_test_id")
+        assert status == expected_status
+        assert data is not None
+        mock_get.assert_called_once_with(
+            f"{mock_config.ilink_base_url}/ilink/bot/get_qrcode_status",
+            params={"qrcode": "qr_test_id"},
+            timeout=10,
+        )
+
+
+def test_poll_qrcode_status_error(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+
+    with patch.object(client.session, "get", return_value=mock_resp):
+        status, data = client.poll_qrcode_status("qr_test_id")
+        assert status == "error"
+        assert data is None
+
+
+def test_get_updates_text_message(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_config.get_updates_buf = "cursor_001"
+
+    response_payload = {
+        "get_updates_buf": "cursor_002",
+        "msgs": [
+            {
+                "msg_id": "wx_msg_1001",
+                "from_user_id": "user_wx_alice",
+                "context_token": "token_alice_1",
+                "item_list": [
+                    {
+                        "type": 1,
+                        "text_item": {"text": "How do I write a Python decorator?"}
+                    }
+                ]
+            }
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = response_payload
+
+    with patch.object(client.session, "post", return_value=mock_resp) as mock_post:
+        res = client.get_updates(timeout=30)
+        assert res.status_code == 200
+        assert res.new_cursor == "cursor_002"
+        assert len(res.messages) == 1
+
+        msg = res.messages[0]
+        assert msg.msg_id == "wx_msg_1001"
+        assert msg.from_user_id == "user_wx_alice"
+        assert msg.context_token == "token_alice_1"
+        assert msg.text == "How do I write a Python decorator?"
+
+        mock_post.assert_called_once_with(
+            f"{mock_config.ilink_base_url}/ilink/bot/getupdates",
+            headers=mock_config.get_auth_headers(),
+            json={"get_updates_buf": "cursor_001", "timeout": 30},
+            timeout=40,
+        )
+
+
+def test_get_updates_multimodal_image(mock_config, mock_media_dir):
+    client = WeChatIlinkClient(mock_config)
+    saved_image_path = mock_media_dir / "img_1002.png"
+    saved_image_path.write_bytes(b"PNG_MOCK")
+
+    response_payload = {
+        "get_updates_buf": "cursor_003",
+        "msgs": [
+            {
+                "msg_id": "wx_msg_1002",
+                "from_user_id": "user_wx_bob",
+                "context_token": "token_bob_1",
+                "item_list": [
+                    {
+                        "type": 2,
+                        "image_item": {
+                            "media": {
+                                "full_url": "https://cdn.wechat.com/img_enc",
+                                "aes_key": "0123456789abcdef0123456789abcdef"
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = response_payload
+
+    with patch.object(client.session, "post", return_value=mock_resp), \
+         patch("wechat_agy_sidecar.media.decrypt_and_save_media", return_value=saved_image_path):
+        res = client.get_updates(timeout=30)
+        assert len(res.messages) == 1
+        msg = res.messages[0]
+        assert "用户发送了一张图片" in msg.text
+        assert str(saved_image_path) in msg.text
+
+
+def test_get_updates_multimodal_voice(mock_config, mock_media_dir):
+    client = WeChatIlinkClient(mock_config)
+
+    response_payload = {
+        "get_updates_buf": "cursor_004",
+        "msgs": [
+            {
+                "msg_id": "wx_msg_1003",
+                "from_user_id": "user_wx_carol",
+                "context_token": "token_carol_1",
+                "item_list": [
+                    {
+                        "type": 3,
+                        "voice_item": {
+                            "text": "请帮我重构这段代码",
+                            "media": {
+                                "full_url": "https://cdn.wechat.com/silk_audio_1003",
+                                "aes_key": "0123456789abcdef0123456789abcdef"
+                            }
+                        }
+                    }
+                ]
+            }
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = response_payload
+
+    with patch.object(client.session, "post", return_value=mock_resp):
+        res = client.get_updates(timeout=30)
+        assert len(res.messages) == 1
+        msg = res.messages[0]
+        assert "请帮我重构这段代码" in msg.text
+        assert "wechat-agy-sidecar download-media voice_wx_msg_1003" in msg.text
+
+
+def test_get_updates_file_and_video(mock_config):
+    client = WeChatIlinkClient(mock_config)
+
+    response_payload = {
+        "get_updates_buf": "cursor_005",
+        "msgs": [
+            {
+                "msg_id": "wx_msg_1004",
+                "from_user_id": "user_wx_dave",
+                "context_token": "token_dave_1",
+                "item_list": [
+                    {
+                        "type": 4,
+                        "file_item": {"file_name": "architecture_diagram.pdf"}
+                    },
+                    {
+                        "type": 5,
+                        "video_item": {}
+                    }
+                ]
+            }
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = response_payload
+
+    with patch.object(client.session, "post", return_value=mock_resp):
+        res = client.get_updates(timeout=30)
+        assert len(res.messages) == 1
+        msg = res.messages[0]
+        assert "architecture_diagram.pdf" in msg.text
+        assert "用户发送了一个视频" in msg.text
+
+
+def test_get_updates_timeout(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_config.get_updates_buf = "cursor_current"
+
+    with patch.object(client.session, "post", side_effect=requests.exceptions.Timeout("Read timeout")):
+        res = client.get_updates(timeout=30)
+        assert res.status_code == 200
+        assert res.new_cursor == "cursor_current"
+        assert res.messages == []
+
+
+def test_get_updates_http_error(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 401
+    mock_resp.text = "Unauthorized Token Expired"
+
+    with patch.object(client.session, "post", return_value=mock_resp):
+        res = client.get_updates(timeout=30)
+        assert res.status_code == 401
+        assert res.messages == []
+        assert "Unauthorized Token Expired" in res.raw_response.get("error", "")
+
+
+def test_send_typing(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+
+    with patch.object(client.session, "post", return_value=mock_resp) as mock_post:
+        client.send_typing("wx_user_123", typing=True)
+        mock_post.assert_called_once_with(
+            f"{mock_config.ilink_base_url}/ilink/bot/sendtyping",
+            headers=mock_config.get_auth_headers(),
+            json={"to_user_id": "wx_user_123", "to_user": "wx_user_123", "typing": True},
+            timeout=5,
+        )
+
+
+def test_send_message_single_chunk(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = '{"ret": 0, "msg": "ok"}'
+
+    with patch.object(client.session, "post", return_value=mock_resp) as mock_post:
+        success = client.send_message("user_wx_alice", "ctx_token_999", "Hello Alice!")
+        assert success is True
+
+        assert mock_post.call_count == 1
+        args, kwargs = mock_post.call_args
+        assert args[0] == f"{mock_config.ilink_base_url}/ilink/bot/sendmessage"
+        payload = kwargs["json"]["msg"]
+        assert payload["to_user_id"] == "user_wx_alice"
+        assert payload["context_token"] == "ctx_token_999"
+        assert payload["message_type"] == 2
+        assert payload["message_state"] == 2
+        assert payload["item_list"][0]["text_item"]["text"] == "Hello Alice!"
+
+
+def test_send_message_chunking(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.text = '{"ret": 0}'
+
+    # 4000 characters should split into 3 chunks: 1800 + 1800 + 400
+    long_text = "A" * 4000
+
+    with patch.object(client.session, "post", return_value=mock_resp) as mock_post:
+        success = client.send_message("user_wx_alice", "ctx_token_1", long_text)
+        assert success is True
+        assert mock_post.call_count == 3
+
+        call_chunks = [call[1]["json"]["msg"]["item_list"][0]["text_item"]["text"] for call in mock_post.call_args_list]
+        assert len(call_chunks[0]) == 1800
+        assert len(call_chunks[1]) == 1800
+        assert len(call_chunks[2]) == 400
+        assert "".join(call_chunks) == long_text
+
+
+def test_send_message_http_failure(mock_config):
+    client = WeChatIlinkClient(mock_config)
+    mock_resp = MagicMock()
+    mock_resp.status_code = 500
+    mock_resp.text = "Internal Server Error"
+
+    with patch.object(client.session, "post", return_value=mock_resp):
+        success = client.send_message("user_wx_alice", "ctx_token_1", "Hello")
+        assert success is False
+
+
+def test_terminal_qr_display_with_qrcode(capsys):
+    TerminalQR.display("https://ilinkai.weixin.qq.com/qr/sample")
+    captured = capsys.readouterr()
+    # When qrcode library is available, ASCII blocks are output
+    assert "█" in captured.out or "https://ilinkai.weixin.qq.com/qr/sample" in captured.out
+
+
+def test_terminal_qr_display_fallback(capsys):
+    orig_import = builtins.__import__
+
+    def mock_import(name, *args, **kwargs):
+        if name == "qrcode":
+            raise ImportError("No module named qrcode")
+        return orig_import(name, *args, **kwargs)
+
+    with patch("builtins.__import__", side_effect=mock_import):
+        with patch("requests.get", side_effect=Exception("Network error")):
+            TerminalQR.display("https://ilinkai.weixin.qq.com/qr/fallback_link")
+            captured = capsys.readouterr()
+            assert "https://ilinkai.weixin.qq.com/qr/fallback_link" in captured.out

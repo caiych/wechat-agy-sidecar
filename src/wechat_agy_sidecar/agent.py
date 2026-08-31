@@ -35,17 +35,20 @@ class AntigravityAgent:
     def _find_agentapi_binary(self) -> Optional[str]:
         """Finds the agentapi executable."""
         candidates = [
+            os.environ.get("ANTIGRAVITY_AGENTAPI_EXE"),
             shutil.which("agentapi"),
             str(Path.home() / ".gemini" / "antigravity-cli" / "bin" / "agentapi"),
-            os.environ.get("ANTIGRAVITY_AGENTAPI_EXE"),
             str(Path.home() / ".local" / "bin" / "agentapi"),
             "/usr/local/bin/agentapi",
             "/usr/bin/agentapi"
         ]
         for c in candidates:
             if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                if Path(c).name == "agy":
+                    continue
                 return c
         return None
+
 
     def _get_transcript_path(self, conversation_id: str) -> Path:
         return BRAIN_DIR / conversation_id / ".system_generated" / "logs" / "transcript.jsonl"

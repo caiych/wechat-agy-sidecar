@@ -1,20 +1,18 @@
 """
-Unit tests for WeChat media decryption, CDN downloads, format detection, and media registry.
+Unit tests for WeChat media decryption and registry in wechat_agy_sidecar.media.
 """
 
 from __future__ import annotations
 
 import base64
-import tempfile
-import unittest
-from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
-import requests
+import pytest
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from tests.mocks.mock_ilink import MockIlinkAdapter, encrypt_aes_ecb
-from wechat_agy_sidecar import media
 from wechat_agy_sidecar.media import (
+    _load_registry,
     decrypt_and_save_media,
     decrypt_bytes,
     download_and_decrypt_media,
@@ -23,110 +21,194 @@ from wechat_agy_sidecar.media import (
 )
 
 
-class TestMediaCryptoAndRegistry(unittest.TestCase):
-    def setUp(self):
-        self.temp_dir = tempfile.TemporaryDirectory()
-        self.test_media_dir = Path(self.temp_dir.name) / "media"
-        self.test_media_dir.mkdir(parents=True, exist_ok=True)
-        self.patcher1 = patch.object(media, "MEDIA_DIR", self.test_media_dir)
-        self.patcher2 = patch.object(media, "MEDIA_REGISTRY_FILE", self.test_media_dir / "registry.json")
-        self.patcher1.start()
-        self.patcher2.start()
+def _encrypt_aes_ecb(plaintext: bytes, key: bytes, pad: bool = True) -> bytes:
+    """Helper to produce AES-128-ECB encrypted test payloads."""
+    if pad:
+        padder = padding.PKCS7(128).padder()
+        plaintext = padder.update(plaintext) + padder.finalize()
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    encryptor = cipher.encryptor()
+    return encryptor.update(plaintext) + encryptor.finalize()
 
-        self.key_16 = b"0123456789abcdef"
-        self.key_hex = self.key_16.hex()
-        self.key_b64 = base64.b64encode(self.key_16).decode()
 
-    def tearDown(self):
-        self.patcher2.stop()
-        self.patcher1.stop()
-        self.temp_dir.cleanup()
+def test_decrypt_bytes_raw_key():
+    raw_key = b"0123456789abcdef"  # 16 bytes
+    secret_text = b"Hello Antigravity WeChat Media!"
+    encrypted = _encrypt_aes_ecb(secret_text, raw_key, pad=True)
 
-    def test_decrypt_bytes_success(self):
-        original_plain = b"Hello WeChat CDN Image Content"
-        ciphertext = encrypt_aes_ecb(original_plain, self.key_16)
+    decrypted = decrypt_bytes(encrypted, raw_key)
+    assert decrypted == secret_text
 
-        # 1. Raw bytes key
-        decrypted_raw = decrypt_bytes(ciphertext, self.key_16)
-        self.assertEqual(decrypted_raw, original_plain)
 
-        # 2. Hex string key
-        decrypted_hex = decrypt_bytes(ciphertext, self.key_hex)
-        self.assertEqual(decrypted_hex, original_plain)
+def test_decrypt_bytes_hex_key():
+    raw_key = b"0123456789abcdef"
+    hex_key = raw_key.hex()  # 32 hex chars
+    secret_text = b"Secret payload with hex key"
+    encrypted = _encrypt_aes_ecb(secret_text, raw_key, pad=True)
 
-        # 3. Base64 string key
-        decrypted_b64 = decrypt_bytes(ciphertext, self.key_b64)
-        self.assertEqual(decrypted_b64, original_plain)
+    decrypted = decrypt_bytes(encrypted, hex_key)
+    assert decrypted == secret_text
 
-    def test_decrypt_bytes_invalid_key_format(self):
-        ciphertext = encrypt_aes_ecb(b"data", self.key_16)
-        with self.assertRaises(ValueError):
-            decrypt_bytes(ciphertext, "short_key")
 
-    def test_format_detection_and_download(self):
-        test_cases = [
-            (b"\x89PNG\r\n\x1a\n" + b"\x00" * 20, ".png"),
-            (b"\xff\xd8\xff\xe0" + b"\x00" * 20, ".jpg"),
-            (b"GIF89a" + b"\x00" * 20, ".gif"),
-            (b"#!SILK_V3" + b"\x00" * 20, ".silk"),
-            (b"#!AMR\n" + b"\x00" * 20, ".amr"),
-            (b"RIFF\x00\x00\x00\x00WEBP" + b"\x00" * 20, ".webp"),
-            (b"RandomBinaryData" + b"\x00" * 20, ".bin"),
-        ]
+def test_decrypt_bytes_base64_key():
+    raw_key = b"0123456789abcdef"
+    b64_key = base64.b64encode(raw_key).decode("utf-8")
+    secret_text = b"Secret payload with base64 key"
+    encrypted = _encrypt_aes_ecb(secret_text, raw_key, pad=True)
 
-        mock_adapter = MockIlinkAdapter()
-        for idx, (raw_data, expected_ext) in enumerate(test_cases):
-            url = f"https://cdn.weixin.qq.com/file_{idx}"
-            mock_adapter.add_cdn_file(url, raw_data, self.key_16)
+    decrypted = decrypt_bytes(encrypted, b64_key)
+    assert decrypted == secret_text
 
-            with patch("requests.get", side_effect=lambda u, timeout=25: mock_adapter.send(requests.Request("GET", u).prepare())):
-                saved_path = download_and_decrypt_media(url, self.key_hex, default_prefix=f"test_{idx}")
-                self.assertIsNotNone(saved_path)
-                self.assertEqual(saved_path.suffix, expected_ext)
-                self.assertEqual(saved_path.read_bytes(), raw_data)
 
-    def test_decrypt_and_save_media_helper(self):
-        raw_png = b"\x89PNG\r\n\x1a\n" + b"image_payload"
-        cdn_url = "https://cdn.weixin.qq.com/img_sample"
-        mock_adapter = MockIlinkAdapter()
-        mock_adapter.add_cdn_file(cdn_url, raw_png, self.key_16)
+def test_decrypt_bytes_base64_encoded_hex_key():
+    raw_key = b"0123456789abcdef"
+    hex_key = raw_key.hex()
+    b64_of_hex = base64.b64encode(hex_key.encode("utf-8")).decode("utf-8")
+    secret_text = b"Secret payload with b64-hex key"
+    encrypted = _encrypt_aes_ecb(secret_text, raw_key, pad=True)
 
-        item_dict = {
+    decrypted = decrypt_bytes(encrypted, b64_of_hex)
+    assert decrypted == secret_text
+
+
+def test_decrypt_bytes_invalid_key():
+    with pytest.raises(ValueError, match="Invalid AES key format"):
+        decrypt_bytes(b"some_encrypted_data", "short_key")
+
+
+def test_decrypt_bytes_unpadded_fallback():
+    raw_key = b"0123456789abcdef"
+    # Plaintext exact multiple of 16 without PKCS7 padding
+    raw_block = b"1234567890123456"
+    encrypted = _encrypt_aes_ecb(raw_block, raw_key, pad=False)
+
+    decrypted = decrypt_bytes(encrypted, raw_key)
+    assert decrypted == raw_block
+
+
+@pytest.mark.parametrize(
+    "magic_prefix, expected_ext",
+    [
+        (b"#!SILK_V3_AUDIO", ".silk"),
+        (b"\x02#!SILK_AUDIO", ".silk"),
+        (b"\x89PNG\r\n\x1a\nIMAGE_DATA", ".png"),
+        (b"GIF89a_IMAGE_DATA", ".gif"),
+        (b"\xff\xd8\xff\xe0_JPEG_DATA", ".jpg"),
+        (b"RIFF\x00\x00\x00\x00WEBPVP8_DATA", ".webp"),
+        (b"#!AMR_AUDIO_DATA", ".amr"),
+        (b"UNKNOWN_BINARY_DATA", ".bin"),
+    ],
+)
+def test_download_and_decrypt_media_magic_bytes(mock_media_dir, magic_prefix, expected_ext):
+    raw_key = b"1234567890abcdef"
+    plaintext = magic_prefix + b" - payload content"
+    encrypted_data = _encrypt_aes_ecb(plaintext, raw_key, pad=True)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = encrypted_data
+
+    with patch("requests.get", return_value=mock_resp):
+        saved_file = download_and_decrypt_media(
+            url="https://tencent.cdn.com/media/file123",
+            key_str=raw_key.hex(),
+            default_prefix="test_media",
+        )
+
+        assert saved_file is not None
+        assert saved_file.exists()
+        assert saved_file.suffix == expected_ext
+        assert saved_file.read_bytes() == plaintext
+
+
+def test_download_and_decrypt_media_custom_output_path(mock_media_dir, temp_dir):
+    raw_key = b"1234567890abcdef"
+    plaintext = b"\x89PNG\r\n\x1a\nCustomImage"
+    encrypted_data = _encrypt_aes_ecb(plaintext, raw_key, pad=True)
+
+    custom_out = temp_dir / "custom_dir" / "my_image.png"
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = encrypted_data
+
+    with patch("requests.get", return_value=mock_resp):
+        saved_file = download_and_decrypt_media(
+            url="https://tencent.cdn.com/media/file_png",
+            key_str=raw_key.hex(),
+            output_path=custom_out,
+        )
+
+        assert saved_file == custom_out
+        assert custom_out.exists()
+        assert custom_out.read_bytes() == plaintext
+
+
+def test_download_and_decrypt_media_http_error(mock_media_dir):
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.text = "Not Found"
+
+    with patch("requests.get", return_value=mock_resp):
+        result = download_and_decrypt_media("https://tencent.cdn.com/missing", "1234567890abcdef1234567890abcdef")
+        assert result is None
+
+
+def test_decrypt_and_save_media_payload_variations(mock_media_dir):
+    raw_key = b"1234567890abcdef"
+    plaintext = b"\x89PNG\r\n\x1a\nImageAttachment"
+    encrypted_data = _encrypt_aes_ecb(plaintext, raw_key, pad=True)
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.content = encrypted_data
+
+    with patch("requests.get", return_value=mock_resp):
+        # Case 1: Nested media dict with full_url and aes_key
+        item_nested = {
             "media": {
-                "full_url": cdn_url,
-                "aes_key": self.key_hex
+                "full_url": "https://cdn.wechat.com/img1",
+                "aes_key": raw_key.hex()
             }
         }
+        res1 = decrypt_and_save_media(item_nested, "msg_101", "img")
+        assert res1 is not None
+        assert res1.read_bytes() == plaintext
 
-        with patch("requests.get", side_effect=lambda u, timeout=25: mock_adapter.send(requests.Request("GET", u).prepare())):
-            saved = decrypt_and_save_media(item_dict, "msg_img_1", media_type="img")
-            self.assertIsNotNone(saved)
-            self.assertTrue(saved.exists())
-            self.assertEqual(saved.suffix, ".png")
-            self.assertEqual(saved.read_bytes(), raw_png)
+        # Case 2: Flat dict with url and aeskey
+        item_flat = {
+            "url": "https://cdn.wechat.com/img2",
+            "aeskey": raw_key.hex()
+        }
+        res2 = decrypt_and_save_media(item_flat, "msg_102", "img")
+        assert res2 is not None
 
-    def test_media_registry_operations(self):
-        mid = "voice_sample_999"
-        res_id = register_media(
-            media_id=mid,
-            media_type="voice",
-            url="https://cdn.weixin.qq.com/voice_sample",
-            key=self.key_hex,
-            metadata={"transcription": "这是一条语音转写文本", "duration_ms": 3500}
-        )
-        self.assertEqual(res_id, mid)
-
-        entry = lookup_media(mid)
-        self.assertIsNotNone(entry)
-        self.assertEqual(entry["type"], "voice")
-        self.assertEqual(entry["url"], "https://cdn.weixin.qq.com/voice_sample")
-        self.assertEqual(entry["key"], self.key_hex)
-        self.assertEqual(entry["transcription"], "这是一条语音转写文本")
-        self.assertEqual(entry["duration_ms"], 3500)
-
-        # Lookup non-existent
-        self.assertIsNone(lookup_media("non_existent_id"))
+        # Case 3: Missing key/url returns None
+        assert decrypt_and_save_media({}, "msg_103") is None
+        assert decrypt_and_save_media({"url": "https://cdn.com"}, "msg_104") is None
 
 
-if __name__ == "__main__":
-    unittest.main()
+def test_media_registry_crud(mock_media_dir):
+    # Empty registry
+    assert _load_registry() == {}
+    assert lookup_media("non_existent") is None
+
+    # Register item
+    media_id = register_media(
+        media_id="voice_msg_999",
+        media_type="voice",
+        url="https://cdn.wechat.com/silk_audio",
+        key="0123456789abcdef0123456789abcdef",
+        metadata={"transcription": "转写测试文本", "duration_ms": 3500}
+    )
+    assert media_id == "voice_msg_999"
+
+    # Lookup
+    entry = lookup_media("voice_msg_999")
+    assert entry is not None
+    assert entry["type"] == "voice"
+    assert entry["url"] == "https://cdn.wechat.com/silk_audio"
+    assert entry["key"] == "0123456789abcdef0123456789abcdef"
+    assert entry["transcription"] == "转写测试文本"
+    assert entry["duration_ms"] == 3500
+    assert "registered_at" in entry
