@@ -92,6 +92,26 @@ cat > "$SIDECAR_CONFIG_DIR/sidecar.json" <<EOF
 EOF
 echo "⚙️  Registered Antigravity Sidecar at: $SIDECAR_CONFIG_DIR/sidecar.json"
 
+# 6. Enable Sidecar in Antigravity Global User Config (~/.gemini/config/config.json)
+python3 -c "
+import json
+from pathlib import Path
+cfg_path = Path.home() / '.gemini' / 'config' / 'config.json'
+if cfg_path.exists():
+    try:
+        data = json.loads(cfg_path.read_text(encoding='utf-8'))
+    except Exception:
+        data = {}
+else:
+    data = {}
+sidecars = data.setdefault('sidecars', {})
+sidecars['wechat-agy-sidecar'] = {'enabled': True}
+cfg_path.parent.mkdir(parents=True, exist_ok=True)
+cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encoding='utf-8')
+"
+echo "⚙️  Enabled sidecar in: ~/.gemini/config/config.json"
+
+
 echo ""
 echo "========================================================"
 echo "✅ Installation complete!"
