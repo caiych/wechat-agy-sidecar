@@ -112,6 +112,12 @@ nohup wechat-agy-sidecar > ~/.gemini/wechat_sidecar.log 2>&1 &
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 ```
 
+## 📌 Known Issues & Roadmap
+
+- **Sidebar Project Visibility**:
+  - *Current Behavior*: WeChat-initiated conversations default to the global `CLI project` (`default-cli-project`) scope in Antigravity. To view past conversations in the Antigravity UI sidebar, select the **CLI project** from the left-hand Projects list, or navigate directly via `conversation://<conversation_id>` links.
+  - *TODO / Roadmap*: Add configurable workspace binding (`--workspace-dir` / `workspace_path` in `wechat_sidecar_config.json`) so WeChat conversations can automatically bind to a specific project workspace.
+
 ---
 
 ## 📄 License
