@@ -204,26 +204,34 @@ class WeChatIlinkClient:
     def send_message(self, to_user_id: str, context_token: str, text: str) -> bool:
         """
         Sends text message chunks conforming to official iLink SendMessage schema.
+        Includes message_type: 2 (BOT), message_state: 2 (FINISH), and client_id.
         """
+        import random
         url = f"{self.config.ilink_base_url}/ilink/bot/sendmessage"
         chunks = [text[i:i + 1800] for i in range(0, len(text), 1800)]
         all_success = True
 
-        for chunk in chunks:
-            payload = {
-                "msg": {
-                    "to_user_id": to_user_id,
-                    "context_token": context_token,
-                    "item_list": [
-                        {
-                            "type": 1,
-                            "text_item": {
-                                "text": chunk
-                            }
+        for i, chunk in enumerate(chunks):
+            client_msg_id = f"msg_{int(time.time() * 1000)}_{random.randint(1000, 9999)}_{i}"
+            msg_payload: Dict[str, Any] = {
+                "from_user_id": "",
+                "to_user_id": to_user_id,
+                "client_id": client_msg_id,
+                "message_type": 2,  # 2 = BOT outbound
+                "message_state": 2, # 2 = FINISH (render in WeChat UI)
+                "item_list": [
+                    {
+                        "type": 1,
+                        "text_item": {
+                            "text": chunk
                         }
-                    ]
-                }
+                    }
+                ]
             }
+            if context_token:
+                msg_payload["context_token"] = context_token
+
+            payload = {"msg": msg_payload}
             try:
                 resp = self.session.post(
                     url,
@@ -231,7 +239,9 @@ class WeChatIlinkClient:
                     json=payload,
                     timeout=10
                 )
-                if resp.status_code != 200:
+                if resp.status_code == 200:
+                    logger.info(f"Successfully sent reply to [{to_user_id}] (len={len(chunk)}): {resp.text}")
+                else:
                     logger.error(f"send_message failed HTTP {resp.status_code}: {resp.text}")
                     all_success = False
             except Exception as e:
@@ -239,3 +249,4 @@ class WeChatIlinkClient:
                 all_success = False
 
         return all_success
+
