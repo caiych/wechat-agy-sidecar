@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import time
 import json
+import random
 import logging
 import urllib.parse
 from dataclasses import dataclass, field
@@ -206,7 +207,6 @@ class WeChatIlinkClient:
         Sends text message chunks conforming to official iLink SendMessage schema.
         Includes message_type: 2 (BOT), message_state: 2 (FINISH), and client_id.
         """
-        import random
         url = f"{self.config.ilink_base_url}/ilink/bot/sendmessage"
         chunks = [text[i:i + 1800] for i in range(0, len(text), 1800)]
         all_success = True

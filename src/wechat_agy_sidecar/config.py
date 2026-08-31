@@ -16,6 +16,11 @@ from typing import Optional, Dict, Any
 DEFAULT_CONFIG_PATH = Path.home() / ".gemini" / "wechat_sidecar_config.json"
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
 DEFAULT_BOT_AGENT = "openclaw-agent/1.0.0 (Antigravity-Bridge)"
+DEFAULT_SYSTEM_INSTRUCTIONS = (
+    "You are connected to the user via WeChat. "
+    "Provide direct, concise, and well-structured answers using GitHub-flavored Markdown. "
+    "Keep code blocks clear and avoid unnecessary preamble."
+)
 
 
 @dataclass
@@ -27,11 +32,7 @@ class SidecarConfig:
     login_time: int = 0
     ilink_base_url: str = DEFAULT_ILINK_BASE_URL
     bot_agent: str = DEFAULT_BOT_AGENT
-    system_instructions: str = (
-        "You are connected to the user via WeChat. "
-        "Provide direct, concise, and well-structured answers using GitHub-flavored Markdown. "
-        "Keep code blocks clear and avoid unnecessary preamble."
-    )
+    system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS
     enable_write_tools: bool = True
     user_conversations: Dict[str, str] = field(default_factory=dict)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
@@ -57,7 +58,7 @@ class SidecarConfig:
                 login_time=data.get("login_time", 0),
                 ilink_base_url=data.get("ilink_base_url", DEFAULT_ILINK_BASE_URL),
                 bot_agent=data.get("bot_agent", DEFAULT_BOT_AGENT),
-                system_instructions=data.get("system_instructions", ""),
+                system_instructions=data.get("system_instructions") or DEFAULT_SYSTEM_INSTRUCTIONS,
                 enable_write_tools=data.get("enable_write_tools", True),
                 user_conversations=data.get("user_conversations", {}),
                 config_path=config_file
@@ -85,6 +86,7 @@ class SidecarConfig:
             "login_time": self.login_time,
             "ilink_base_url": self.ilink_base_url,
             "bot_agent": self.bot_agent,
+            "system_instructions": self.system_instructions,
             "enable_write_tools": self.enable_write_tools,
             "user_conversations": self.user_conversations
         }

@@ -22,6 +22,7 @@ class TestWeChatSidecar(unittest.TestCase):
             self.assertEqual(loaded.bot_token, "test_token_123")
             self.assertEqual(loaded.bot_id, "test_bot")
             self.assertTrue(bool(loaded.uin))
+            self.assertTrue(len(loaded.system_instructions) > 0)
             self.assertIn("Authorization", loaded.get_auth_headers())
             self.assertEqual(loaded.get_auth_headers()["AuthorizationType"], "ilink_bot_token")
 
