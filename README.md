@@ -110,9 +110,12 @@ To enable native Antigravity lifecycle management, copy or symlink `sidecar.json
 | *(Any text)* | Continues the active multi-turn conversation thread. | `帮我把刚才的函数改成异步版本` |
 | `/new` | Resets conversation thread and waits for new input. | `/new` |
 | `/new <prompt>` | Resets thread and immediately executes prompt in the new thread. | `/new 用 Go 写一个 HTTP 客户端` |
+| `/resume` (or `/history`) | Lists recent conversations with titles to select by replying with a number. | `/resume` |
+| `/resume <index\|id>` | Switches directly to the specified conversation number or UUID. | `/resume 2` |
 | `/reset` | Alias for `/new`. | `/reset` |
 | *(Image)* | Uploads image; automatically decrypted for agent inspection. | `[Image Attachment]` |
-| *(Voice)* | Voice input; default transcribed text passed with on-demand raw audio CLI check. | `[Voice Input]` |
+| *(Voice)* | Voice input; passed with transcribed text and registered `media_id` for on-demand inspection. | `[Voice Input]` |
+| *(y / n / 同意 / 拒绝)* | Approves or rejects remote tool execution / permission requests. | `y` |
 
 ---
 
@@ -122,7 +125,10 @@ To enable native Antigravity lifecycle management, copy or symlink `sidecar.json
 # Run unit tests
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
 
-# Download & decrypt raw media attachment
+# Download & inspect media by registry ID
+wechat-agy-sidecar download-media voice_1001
+
+# Or direct URL/key mode (backward compatible)
 wechat-agy-sidecar download-media --url "<CDN_URL>" --key "<AES_KEY>" --output "/tmp/media.silk"
 ```
 
@@ -132,7 +138,10 @@ wechat-agy-sidecar download-media --url "<CDN_URL>" --key "<AES_KEY>" --output "
 
 - ✅ **Sidebar & Conversation Discovery**: Fully resolved with `agentapi` integration — conversations created via `agentapi new-conversation` are first-class Antigravity sessions and immediately accessible.
 - ✅ **Proactive Timer & Subagent Push**: Resolved via `proactive_event_watcher` reading real-time conversation trajectories.
-- ⏳ **Mobile Interactive Permission Cards**: Stream permission requests (`run_command`, file modifications) as interactive WeChat prompt cards for remote allow/deny authorization.
+- ✅ **Interactive Permission & Question Cards**: Relays permission prompts and questions directly to WeChat for remote `y`/`n` authorization.
+- ✅ **Voice Media Registry & CLI**: Clean metadata registry (`~/.gemini/wechat_media/registry.json`) for lazy audio inspection with zero token/arg clutter.
+- ✅ **Multi-Session Switcher (`/resume`)**: View recent conversation history and switch active threads seamlessly.
+- ✅ **Project ID Routing**: Configure `WECHAT_SIDECAR_PROJECT_ID` or config `project_id` to route conversations to specific workspaces.
 
 ---
 

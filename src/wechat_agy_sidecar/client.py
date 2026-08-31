@@ -177,15 +177,20 @@ class WeChatIlinkClient:
                         media_info = voice_item.get("media", {})
                         media_url = media_info.get("full_url") or voice_item.get("url") or ""
                         raw_key = voice_item.get("aeskey") or media_info.get("aes_key") or voice_item.get("aes_key") or media_info.get("aeskey") or ""
-                        out_path_str = f"/tmp/wechat_voice_{msg_id or int(time.time())}.silk"
-                        cli_cmd = f'wechat-agy-sidecar download-media --url "{media_url}" --key "{raw_key}" --output "{out_path_str}"'
+
+                        # Register in media registry for clean CLI access
+                        voice_media_id = f"voice_{msg_id or int(time.time())}"
+                        if media_url and raw_key:
+                            from wechat_agy_sidecar.media import register_media
+                            register_media(voice_media_id, "voice", media_url, raw_key, {"transcription": transcribed_text})
 
                         voice_prompt = (
                             f"[用户发送了一条语音消息 (Voice Input)]\n"
-                            f"微信默认转写文本: \"{transcribed_text or '（微信未返回自动转写文本）'}\"\n"
-                            f"CLI 原始音频检视命令: `{cli_cmd}`\n"
-                            f"（提示：默认请直接基于上述微信转写文本进行回答。若转写内容疑似有误、不完整，或用户要求复核原始语音时，可按需运行上述 CLI 命令按需拉取并检视 raw data 音频文件。）\n\n"
-                            f"用户指令: {transcribed_text or '（微信未返回有效转写文本，如需处理请运行上述 CLI 命令下载并解析原始音频）'}\n"
+                            f"微信转写文本: \"{transcribed_text or '（微信未返回自动转写文本）'}\"\n"
+                            f"原始音频 ID: {voice_media_id}\n"
+                            f"检视命令: `wechat-agy-sidecar download-media {voice_media_id}`\n"
+                            f"（提示：默认请直接基于上述微信转写文本进行回答。若转写内容疑似有误、不完整，或用户要求复核原始语音时，可运行上述命令下载原始音频。）\n\n"
+                            f"用户指令: {transcribed_text or '（微信未返回有效转写文本，如需处理请运行上述命令下载原始音频）'}\n"
                         )
                         text += voice_prompt
                     elif item_type == 4 or file_item:

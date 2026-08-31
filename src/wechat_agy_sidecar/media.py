@@ -6,6 +6,7 @@ Handles AES-128-ECB CDN payload decryption for inbound images, audio (Silk v3), 
 from __future__ import annotations
 
 import time
+import json
 import base64
 import logging
 from pathlib import Path
@@ -121,3 +122,39 @@ def decrypt_and_save_media(item_dict: Dict[str, Any], msg_id: str, media_type: s
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
     prefix = f"{media_type}_{msg_id or int(time.time())}"
     return download_and_decrypt_media(url, raw_key, default_prefix=prefix)
+
+
+MEDIA_REGISTRY_FILE = MEDIA_DIR / "registry.json"
+
+def _load_registry() -> Dict[str, Any]:
+    """Loads the media registry from disk."""
+    if MEDIA_REGISTRY_FILE.exists():
+        try:
+            return json.loads(MEDIA_REGISTRY_FILE.read_text(encoding='utf-8'))
+        except Exception:
+            return {}
+    return {}
+
+def _save_registry(registry: Dict[str, Any]):
+    """Saves the media registry to disk."""
+    MEDIA_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+    MEDIA_REGISTRY_FILE.write_text(json.dumps(registry, indent=2, ensure_ascii=False), encoding='utf-8')
+
+def register_media(media_id: str, media_type: str, url: str, key: str, metadata: Optional[Dict[str, Any]] = None) -> str:
+    """Registers a media entry in the local registry. Returns the media_id."""
+    registry = _load_registry()
+    registry[media_id] = {
+        "type": media_type,
+        "url": url,
+        "key": key,
+        "registered_at": int(time.time()),
+        **(metadata or {})
+    }
+    _save_registry(registry)
+    logger.info(f"Registered media: {media_id} (type={media_type})")
+    return media_id
+
+def lookup_media(media_id: str) -> Optional[Dict[str, Any]]:
+    """Looks up a media entry by ID from the registry."""
+    registry = _load_registry()
+    return registry.get(media_id)

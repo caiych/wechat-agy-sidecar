@@ -1,7 +1,7 @@
 """
 WeChat Antigravity Sidecar Orchestrator & Daemon.
-Handles persistent user conversation threading, /new command routing,
-and proactive background event streaming via agentapi & transcript monitoring.
+Handles persistent user conversation threading, /new and /resume command routing,
+permission request cards, and proactive background event streaming via agentapi & transcript monitoring.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import signal
 import asyncio
 import logging
 from pathlib import Path
-from typing import Optional, Dict
+from typing import Optional, Dict, List, Set
 
 from wechat_agy_sidecar.config import SidecarConfig
 from wechat_agy_sidecar.client import WeChatIlinkClient, InboundMessage, TerminalQR
@@ -33,6 +33,8 @@ class WeChatSidecar:
         self.agent = AntigravityAgent(self.config)
         self.running = True
         self.conversation_cursors: Dict[str, int] = {}  # conv_id -> last_seen_line_count
+        self.pending_resume: Dict[str, List[Dict]] = {}  # user_id -> list of recent conv dicts
+        self.notified_permission_steps: Set[str] = set()  # "conv_id:step_index" -> already notified
 
     def run_onboarding_login(self) -> bool:
         """Runs the interactive QR-code authentication flow."""
@@ -80,16 +82,82 @@ class WeChatSidecar:
         Supports:
           - '/new' or '/reset' -> resets thread and replies with confirmation
           - '/new <prompt>' -> resets thread and immediately executes prompt in new thread
+          - '/resume' -> lists recent conversations to switch
+          - '/resume <index|id>' -> switches to specified conversation
+          - numeric replies to pending /resume listings
         """
         user_id = msg.from_user_id
         text = msg.text.strip()
         force_new_thread = False
         actual_prompt = text
 
-        # Parse command prefixes: /new, /reset, /clear
+        # 1. Handle /resume command variations
+        if text.lower() in ["/resume", "/history", "/list", "恢复会话", "切换会话", "历史会话"]:
+            recent = self.config.get_recent_conversations(user_id, n=5)
+            curr_id = self.config.get_conversation_id(user_id)
+            if not recent and curr_id:
+                title = self.agent.extract_conversation_title(curr_id)
+                self.config.record_conversation(user_id, curr_id, title)
+                recent = self.config.get_recent_conversations(user_id, n=5)
+
+            if not recent:
+                self.client.send_message(user_id, msg.context_token, "📋 暂无历史会话记录。\n输入你的问题或发送 /new 开始新对话！")
+                return
+
+            self.pending_resume[user_id] = recent
+            reply_lines = ["📋 [最近的 Antigravity 会话列表]"]
+            for idx, item in enumerate(recent, 1):
+                c_id = item.get("conv_id", "")
+                t_str = time.strftime("%m-%d %H:%M", time.localtime(item.get("created_at", time.time())))
+                title = item.get("title") or self.agent.extract_conversation_title(c_id)
+                active_mark = " ⭐ [当前会话]" if c_id == curr_id else ""
+                reply_lines.append(f"{idx}. {t_str} | {title}{active_mark}")
+
+            reply_lines.append("\n👉 请直接回复序号（如 1 或 2）切换会话，或回复 \"/resume 1\"。")
+            self.client.send_message(user_id, msg.context_token, "\n".join(reply_lines))
+            return
+
+        # Direct /resume <arg> command
+        if text.lower().startswith("/resume ") or text.lower().startswith("/resume:") or text.lower().startswith("/resume："):
+            arg = text.split(None, 1)[1].strip() if " " in text else text[8:].strip()
+            recent = self.config.get_recent_conversations(user_id, n=10)
+            if arg.isdigit():
+                idx = int(arg) - 1
+                if 0 <= idx < len(recent):
+                    target = recent[idx]
+                    self.config.set_conversation_id(user_id, target["conv_id"])
+                    self.pending_resume.pop(user_id, None)
+                    title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
+                    self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
+                    return
+                else:
+                    self.client.send_message(user_id, msg.context_token, f"❌ 序号无效，请输入 1 到 {len(recent)} 之间的数字。")
+                    return
+            elif arg:
+                self.config.set_conversation_id(user_id, arg)
+                self.pending_resume.pop(user_id, None)
+                title = self.agent.extract_conversation_title(arg)
+                self.config.record_conversation(user_id, arg, title)
+                self.client.send_message(user_id, msg.context_token, f"✅ 已成功切换至指定会话: {title} (ID: {arg[:8]}...)\n接下来发送的消息将继续该会话。")
+                return
+
+        # Numeric selection from pending /resume menu
+        if user_id in self.pending_resume and text.isdigit():
+            recent = self.pending_resume[user_id]
+            idx = int(text) - 1
+            if 0 <= idx < len(recent):
+                target = recent[idx]
+                self.config.set_conversation_id(user_id, target["conv_id"])
+                del self.pending_resume[user_id]
+                title = target.get("title") or self.agent.extract_conversation_title(target["conv_id"])
+                self.client.send_message(user_id, msg.context_token, f"✅ 已切换至会话 #{idx + 1}: {title}\n接下来发送的消息将继续该会话。")
+                return
+
+        # 2. Parse command prefixes: /new, /reset, /clear
         for cmd_prefix in ["/new", "/reset", "/clear"]:
             if text.lower() == cmd_prefix or text in ["新对话", "重置会话"]:
                 self.config.reset_conversation(user_id)
+                self.pending_resume.pop(user_id, None)
                 logger.info(f"Reset conversation thread for user [{user_id}]")
                 self.client.send_message(user_id, msg.context_token, "🔄 会话已重置，已开启全新的对话线程！请输入你的问题：")
                 return
@@ -100,6 +168,7 @@ class WeChatSidecar:
                     sep_idx = max(text.find("："), text.find(":"))
                 actual_prompt = text[sep_idx + 1:].strip()
                 self.config.reset_conversation(user_id)
+                self.pending_resume.pop(user_id, None)
                 logger.info(f"Resetting thread and executing prompt for user [{user_id}]: {actual_prompt}")
                 break
 
@@ -109,25 +178,27 @@ class WeChatSidecar:
 
         logger.info(f"Incoming message from [{user_id}]: {actual_prompt[:60]} (force_new={force_new_thread})")
         
-        # 1. Determine conversation ID for this user
+        # 3. Determine conversation ID for this user
         conv_id = None if force_new_thread else self.config.get_conversation_id(user_id)
         if conv_id:
             logger.info(f"Continuing thread [{conv_id}] for user [{user_id}]")
         else:
             logger.info(f"Starting new thread for user [{user_id}] via agentapi")
 
-        # 2. Send typing status
+        # 4. Send typing status
         self.client.send_typing(user_id, typing=True)
 
-        # 3. Execute via Antigravity agentapi
+        # 5. Execute via Antigravity agentapi
         start_t = time.time()
         reply_text, new_conv_id = await self.agent.execute(actual_prompt, conversation_id=conv_id)
         elapsed = time.time() - start_t
         logger.info(f"Antigravity reply generated in {elapsed:.2f}s (conv={new_conv_id}) for [{user_id}]")
 
-        # 4. Save updated thread ID and update cursor
+        # 6. Save updated thread ID and record in history
         if new_conv_id:
             self.config.set_conversation_id(user_id, new_conv_id)
+            title = self.agent.extract_conversation_title(new_conv_id)
+            self.config.record_conversation(user_id, new_conv_id, title)
             # Update cursor to current line count so proactive watcher doesn't duplicate this reply
             t_file = BRAIN_DIR / new_conv_id / ".system_generated" / "logs" / "transcript.jsonl"
             if t_file.exists():
@@ -136,14 +207,15 @@ class WeChatSidecar:
                 except Exception:
                     pass
 
-        # 5. Cancel typing & send reply
+        # 7. Cancel typing & send reply
         self.client.send_typing(user_id, typing=False)
         self.client.send_message(user_id, msg.context_token, reply_text)
 
     async def proactive_event_watcher(self):
         """
         Background task continuously monitoring active user conversation transcripts.
-        Pushes any new Assistant responses (e.g. background timers, subagents) to WeChat.
+        Pushes any new Assistant responses (e.g. background timers, subagents) and
+        interactive permission request cards (e.g. run_command, ask_question) to WeChat.
         """
         logger.info("Proactive event watcher started.")
         while self.running:
@@ -167,12 +239,56 @@ class WeChatSidecar:
                         for line in lines[last_seen:]:
                             try:
                                 step = json.loads(line)
-                                # Check if it is an async assistant response
-                                if step.get("type") == "PLANNER_RESPONSE" and step.get("content"):
+                                step_idx = step.get("step_index", 0)
+                                step_type = step.get("type", "")
+
+                                # Case 1: Proactive text output (timers, scheduled tasks, background subagents)
+                                if step_type == "PLANNER_RESPONSE" and step.get("content"):
                                     content = step.get("content", "").strip()
                                     if content and not step.get("tool_calls"):
                                         logger.info(f"Pushing proactive background message to user [{user_id}] from conv [{conv_id}]")
                                         self.client.send_message(user_id, "", content)
+
+                                # Case 2: Interactive Permission / Tool Request Cards
+                                if step_type == "PLANNER_RESPONSE" and step.get("tool_calls"):
+                                    for tool_call in step.get("tool_calls", []):
+                                        tool_name = tool_call.get("name", "")
+                                        tool_args = tool_call.get("args", {})
+                                        perm_key = f"{conv_id}:{step_idx}:{tool_name}"
+
+                                        if perm_key not in self.notified_permission_steps:
+                                            self.notified_permission_steps.add(perm_key)
+
+                                            # Formatting interactive cards
+                                            if tool_name == "ask_question":
+                                                questions = tool_args.get("questions", [])
+                                                q_parts = []
+                                                for q in questions:
+                                                    q_text = q.get("question", "")
+                                                    opts = q.get("options", [])
+                                                    opt_str = "\n".join([f"  {oi+1}. {opt}" for oi, opt in enumerate(opts)])
+                                                    q_parts.append(f"❓ {q_text}\n{opt_str}")
+                                                card = (
+                                                    "💬 [Antigravity 交互提问]\n"
+                                                    + "\n\n".join(q_parts)
+                                                    + "\n\n👉 请直接回复选项序号或内容进行选择。"
+                                                )
+                                                self.client.send_message(user_id, "", card)
+
+                                            elif tool_name in ["run_command", "write_to_file", "replace_file_content"]:
+                                                action = tool_args.get("toolAction") or tool_args.get("toolSummary") or tool_name
+                                                detail = tool_args.get("CommandLine") or tool_args.get("TargetFile") or ""
+                                                if len(detail) > 140:
+                                                    detail = detail[:140] + "..."
+                                                card = (
+                                                    "⚠️ [Antigravity 权限确认 / 操作申请]\n"
+                                                    f"🔧 工具: `{tool_name}`\n"
+                                                    f"📌 说明: {action}\n"
+                                                    + (f"💻 详情: `{detail}`\n" if detail else "")
+                                                    + "\n👉 回复 \"y\" (同意) 或 \"n\" (拒绝) 进行授权确认。"
+                                                )
+                                                self.client.send_message(user_id, "", card)
+
                             except Exception as e:
                                 logger.debug(f"Error parsing proactive step: {e}")
 

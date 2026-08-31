@@ -57,8 +57,9 @@ def main():
 
     # 2. download-media subcommand
     dl_parser = subparsers.add_parser("download-media", help="Download and decrypt WeChat CDN media payload")
-    dl_parser.add_argument("--url", "-u", required=True, help="Encrypted media URL from Tencent CDN")
-    dl_parser.add_argument("--key", "-k", required=True, help="AES decryption key (hex or base64)")
+    dl_parser.add_argument("media_id", nargs="?", default=None, help="Media ID from registry (e.g. voice_12345)")
+    dl_parser.add_argument("--url", "-u", required=False, help="Encrypted media URL from Tencent CDN (direct mode)")
+    dl_parser.add_argument("--key", "-k", required=False, help="AES decryption key (hex or base64) (direct mode)")
     dl_parser.add_argument("--output", "-o", required=False, default=None, help="Output destination file path")
 
     args = parser.parse_args()
@@ -72,8 +73,30 @@ def main():
     )
 
     if args.subcommand == "download-media":
-        print(f"Downloading and decrypting media from {args.url[:60]}...")
-        saved = download_and_decrypt_media(args.url, args.key, args.output)
+        if args.media_id:
+            # Registry-based lookup
+            from wechat_agy_sidecar.media import lookup_media, download_and_decrypt_media
+            entry = lookup_media(args.media_id)
+            if not entry:
+                print(f"❌ Media ID '{args.media_id}' not found in registry.", file=sys.stderr)
+                print(f"Available IDs can be found in: ~/.gemini/wechat_media/registry.json", file=sys.stderr)
+                sys.exit(1)
+            print(f"Resolved media ID '{args.media_id}': type={entry.get('type')}, registered_at={entry.get('registered_at')}")
+            url = entry["url"]
+            key = entry["key"]
+            if entry.get("transcription"):
+                print(f"WeChat transcription: \"{entry['transcription']}\"")
+        elif args.url and args.key:
+            # Direct URL+key mode (backward compat)
+            from wechat_agy_sidecar.media import download_and_decrypt_media
+            url = args.url
+            key = args.key
+        else:
+            print("❌ Provide either a <media_id> or --url + --key.", file=sys.stderr)
+            sys.exit(1)
+
+        print(f"Downloading and decrypting media from {url[:60]}...")
+        saved = download_and_decrypt_media(url, key, args.output)
         if saved:
             print(f"✅ Successfully decrypted and saved media to: {saved.resolve()}")
             sys.exit(0)

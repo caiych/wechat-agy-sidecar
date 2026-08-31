@@ -10,7 +10,8 @@
     "PATH": "/home/caiych/.local/bin:/usr/local/bin:/usr/bin:/bin",
     "HOME": "/home/caiych",
     "ANTIGRAVITY_AGENTAPI_EXE": "/home/caiych/.local/bin/agy",
-    "WECHAT_SIDECAR_CONFIG": "/home/caiych/.gemini/wechat_sidecar_config.json"
+    "WECHAT_SIDECAR_CONFIG": "/home/caiych/.gemini/wechat_sidecar_config.json",
+    "WECHAT_SIDECAR_PROJECT_ID": ""
   },
   "enabled": true
 }

@@ -50,6 +50,26 @@ class AntigravityAgent:
     def _get_transcript_path(self, conversation_id: str) -> Path:
         return BRAIN_DIR / conversation_id / ".system_generated" / "logs" / "transcript.jsonl"
 
+    def extract_conversation_title(self, conversation_id: str) -> str:
+        """Extracts a short, human-readable title from the first turn of the transcript."""
+        t_file = self._get_transcript_path(conversation_id)
+        if not t_file.exists():
+            return f"会话 ({conversation_id[:8]})"
+        try:
+            for line in t_file.read_text(encoding="utf-8").strip().splitlines()[:10]:
+                step = json.loads(line)
+                if step.get("type") == "USER_INPUT" and step.get("content"):
+                    raw = step["content"]
+                    # Strip XML/HTML wrapper tags if any
+                    import re
+                    clean = re.sub(r"<[^>]+>", "", raw).strip()
+                    first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
+                    if first_line:
+                        return first_line[:36] + ("..." if len(first_line) > 36 else "")
+        except Exception as e:
+            logger.debug(f"Error extracting title for {conversation_id}: {e}")
+        return f"会话 ({conversation_id[:8]})"
+
     def _count_transcript_lines(self, conversation_id: str) -> int:
         t_file = self._get_transcript_path(conversation_id)
         if not t_file.exists():
@@ -107,11 +127,18 @@ class AntigravityAgent:
                 start_line = self._count_transcript_lines(conversation_id)
                 logger.info(f"Sending message to conversation {conversation_id} via agentapi...")
                 cmd = [self.agentapi_bin, "send-message", conversation_id, prompt]
+                
+                env = os.environ.copy()
+                project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+                if project_id:
+                    env["AGENTAPI_PROJECT_ID"] = project_id
+                    logger.info(f"Using project ID: {project_id}")
+
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env=os.environ.copy()
+                    env=env
                 )
                 stdout, stderr = await proc.communicate()
                 if proc.returncode != 0:
@@ -135,11 +162,19 @@ class AntigravityAgent:
         """
         logger.info("Creating new conversation via agentapi...")
         cmd = [self.agentapi_bin, "new-conversation", prompt]
+        
+        env = os.environ.copy()
+        # Inject project ID from config or environment
+        project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+        if project_id:
+            env["AGENTAPI_PROJECT_ID"] = project_id
+            logger.info(f"Using project ID: {project_id}")
+        
         proc = await asyncio.create_subprocess_exec(
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy()
+            env=env
         )
         stdout, stderr = await proc.communicate()
         out_str = stdout.decode("utf-8", errors="replace").strip()
