@@ -34,6 +34,7 @@ jobs:
         run: |
           ruff check src/ tests/
 
-      - name: Run Unit Tests
+      - name: Run Tests
         run: |
-          python -m unittest discover -s tests -p "test_*.py" -v
+          pytest -v
+
