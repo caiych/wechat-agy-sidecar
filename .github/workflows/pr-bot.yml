@@ -1,0 +1,41 @@
+name: PR Review & Code Analysis
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  code-analysis:
+    name: Automated PR Code Inspection
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+
+    steps:
+      - name: Checkout PR Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Linting & Formatting Tools
+        run: |
+          pip install ruff bandit
+
+      - name: Run Ruff Code Quality Scan
+        id: ruff
+        run: |
+          echo "### 🔍 Ruff Lint & Format Report" >> $GITHUB_STEP_SUMMARY
+          ruff check src/ tests/ || true
+          ruff check src/ tests/ --output-format=github
+
+      - name: Run Bandit Security Analysis
+        id: bandit
+        run: |
+          echo "### 🛡️ Security Vulnerability Scan" >> $GITHUB_STEP_SUMMARY
+          bandit -r src/ -ll || true
