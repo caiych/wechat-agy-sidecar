@@ -48,21 +48,25 @@ A lightweight, robust native sidecar daemon that connects **WeChat** directly wi
 
 ## 📦 Installation
 
-### Option 1: Modern Editable Install (Recommended)
+### Option 1: Automated One-Step Install (Recommended)
 
 ```bash
 git clone https://github.com/caiych/wechat-agy-sidecar.git
 cd wechat-agy-sidecar
 
-# Install dependencies in venv
-python3 -m venv .venv
-.venv/bin/pip install -e .
+# Run installer (sets up venv, installs dependencies, links CLI to ~/.local/bin, and registers sidecar)
+./install.sh
 ```
 
-### Option 2: Using requirements.txt
+### Option 2: Manual Install
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# Link CLI to user PATH for media download & tool commands
+mkdir -p ~/.local/bin
+ln -sf $(pwd)/.venv/bin/wechat-agy-sidecar ~/.local/bin/wechat-agy-sidecar
 ```
 
 ---
