@@ -173,7 +173,25 @@ class WeChatIlinkClient:
                     elif item_type == 3 or voice_item:
                         has_media = True
                         logger.info(f"Received Voice message: {voice_item}")
-                        text += "[用户发送了一条语音消息 (Voice)]\n"
+                        from wechat_agy_sidecar.media import decrypt_and_save_media
+                        transcribed_text = (voice_item.get("text") or item.get("text") or "").strip()
+                        media_info = voice_item.get("media", {})
+                        media_url = media_info.get("full_url") or voice_item.get("url") or ""
+                        raw_key = voice_item.get("aeskey") or media_info.get("aes_key") or voice_item.get("aes_key") or media_info.get("aeskey") or ""
+                        saved_audio = decrypt_and_save_media(voice_item, msg_id, media_type="voice")
+                        saved_str = f"file://{saved_audio.resolve()}" if saved_audio else "下载失败"
+                        out_path_str = str(saved_audio.resolve()) if saved_audio else "/tmp/voice.silk"
+                        cli_cmd = f'wechat-agy-sidecar download-media --url "{media_url}" --key "{raw_key}" --output "{out_path_str}"'
+
+                        voice_prompt = (
+                            f"[用户发送了一条语音消息 (Voice Input)]\n"
+                            f"微信默认转写文本: \"{transcribed_text or '（微信未返回自动转写文本）'}\"\n"
+                            f"原始语音文件已保存至: {saved_str}\n"
+                            f"CLI 检视命令: `{cli_cmd}`\n"
+                            f"（提示：若用户要求复核原始语音或转写疑似有误，可运行上述 CLI 命令检查 raw data 音频文件。）\n\n"
+                            f"用户语音内容: {transcribed_text or '请提示用户微信未提供自动语音转写，并提示已保存原始语音文件。'}\n"
+                        )
+                        text += voice_prompt
                     elif item_type == 4 or file_item:
                         has_media = True
                         file_name = file_item.get("file_name", "未知文件")

@@ -1,6 +1,6 @@
 """
 Media decryptor & downloader for WeChat iLink CDN attachments.
-Handles AES-128-ECB CDN payload decryption for inbound images, audio, and files.
+Handles AES-128-ECB CDN payload decryption for inbound images, audio (Silk v3), and files.
 """
 
 from __future__ import annotations
@@ -20,35 +20,18 @@ logger = logging.getLogger("wechat_agy_sidecar.media")
 MEDIA_DIR = Path.home() / ".gemini" / "wechat_media"
 
 
-def decrypt_and_save_media(image_item: Dict[str, Any], msg_id: str) -> Optional[Path]:
-    """
-    Downloads encrypted media from Tencent CDN, decrypts with AES-128-ECB, and saves to disk.
-    """
-    try:
-        media = image_item.get("media", {})
-        url = media.get("full_url") or image_item.get("url") or image_item.get("full_url")
-        if not url:
-            logger.warning(f"No media download URL found in image_item: {image_item}")
-            return None
+def decrypt_bytes(encrypted_data: bytes, raw_key: str | bytes) -> bytes:
+    """Decrypts AES-128-ECB encrypted payload from Tencent CDN."""
+    key: Optional[bytes] = None
 
-        # Determine AES key
-        raw_key = (
-            image_item.get("aeskey")
-            or media.get("aes_key")
-            or image_item.get("aes_key")
-            or media.get("aeskey")
-        )
-        if not raw_key:
-            logger.warning("No AES key found in media payload.")
-            return None
-
-        key: Optional[bytes] = None
+    if isinstance(raw_key, bytes):
+        key = raw_key
+    elif isinstance(raw_key, str):
         if len(raw_key) == 32:  # Hex-encoded string
             try:
                 key = bytes.fromhex(raw_key)
             except Exception:
                 pass
-
         if not key:
             try:
                 decoded = base64.b64decode(raw_key)
@@ -59,31 +42,42 @@ def decrypt_and_save_media(image_item: Dict[str, Any], msg_id: str) -> Optional[
             except Exception:
                 pass
 
-        if not key or len(key) != 16:
-            logger.warning(f"Invalid AES key: {raw_key}")
-            return None
+    if not key or len(key) != 16:
+        raise ValueError(f"Invalid AES key format: {raw_key} (expected 16-byte key)")
 
-        # Download encrypted payload
-        resp = requests.get(url, timeout=20)
+    cipher = Cipher(algorithms.AES(key), modes.ECB())
+    decryptor = cipher.decryptor()
+    decrypted = decryptor.update(encrypted_data) + decryptor.finalize()
+
+    # Unpad PKCS7 if padded
+    try:
+        unpadder = padding.PKCS7(128).unpadder()
+        unpadded = unpadder.update(decrypted) + unpadder.finalize()
+        return unpadded
+    except Exception:
+        return decrypted
+
+
+def download_and_decrypt_media(
+    url: str,
+    key_str: str,
+    output_path: Optional[Path | str] = None,
+    default_prefix: str = "media"
+) -> Optional[Path]:
+    """Downloads encrypted media from URL, decrypts with AES-128-ECB, and saves to output_path."""
+    try:
+        resp = requests.get(url, timeout=25)
         if resp.status_code != 200:
             logger.error(f"Failed to download media from CDN: HTTP {resp.status_code}")
             return None
 
-        # Decrypt AES-128-ECB
-        cipher = Cipher(algorithms.AES(key), modes.ECB())
-        decryptor = cipher.decryptor()
-        decrypted = decryptor.update(resp.content) + decryptor.finalize()
+        unpadded = decrypt_bytes(resp.content, key_str)
 
-        # Unpad PKCS7 if padded
-        try:
-            unpadder = padding.PKCS7(128).unpadder()
-            unpadded = unpadder.update(decrypted) + unpadder.finalize()
-        except Exception:
-            unpadded = decrypted
-
-        # Determine file extension
-        ext = ".jpg"
-        if unpadded.startswith(b"\x89PNG"):
+        # Detect extension from magic bytes
+        ext = ".bin"
+        if b"#!SILK" in unpadded[:16] or unpadded.startswith(b"\x02#!SILK"):
+            ext = ".silk"
+        elif unpadded.startswith(b"\x89PNG"):
             ext = ".png"
         elif unpadded.startswith(b"GIF8"):
             ext = ".gif"
@@ -91,15 +85,39 @@ def decrypt_and_save_media(image_item: Dict[str, Any], msg_id: str) -> Optional[
             ext = ".jpg"
         elif unpadded.startswith(b"RIFF") and b"WEBP" in unpadded[:16]:
             ext = ".webp"
+        elif unpadded.startswith(b"#!AMR"):
+            ext = ".amr"
 
-        MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-        file_path = MEDIA_DIR / f"img_{msg_id or int(time.time())}{ext}"
-        with open(file_path, "wb") as f:
+        if output_path:
+            out_file = Path(output_path)
+        else:
+            MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+            out_file = MEDIA_DIR / f"{default_prefix}_{int(time.time())}{ext}"
+
+        out_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(out_file, "wb") as f:
             f.write(unpadded)
 
-        logger.info(f"Successfully decrypted and saved WeChat image ({len(unpadded)} bytes) to: {file_path}")
-        return file_path
-
+        logger.info(f"Decrypted media saved ({len(unpadded)} bytes) to: {out_file}")
+        return out_file
     except Exception as e:
-        logger.error(f"Failed to decrypt and save WeChat media: {e}", exc_info=True)
+        logger.error(f"download_and_decrypt_media error: {e}", exc_info=True)
         return None
+
+
+def decrypt_and_save_media(item_dict: Dict[str, Any], msg_id: str, media_type: str = "img") -> Optional[Path]:
+    """Helper to extract URL and AES key from an item payload (image or voice) and save."""
+    media = item_dict.get("media", {})
+    url = media.get("full_url") or item_dict.get("url") or item_dict.get("full_url")
+    raw_key = (
+        item_dict.get("aeskey")
+        or media.get("aes_key")
+        or item_dict.get("aes_key")
+        or media.get("aeskey")
+    )
+    if not url or not raw_key:
+        return None
+
+    MEDIA_DIR.mkdir(parents=True, exist_ok=True)
+    prefix = f"{media_type}_{msg_id or int(time.time())}"
+    return download_and_decrypt_media(url, raw_key, default_prefix=prefix)
