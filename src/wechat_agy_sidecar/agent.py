@@ -62,10 +62,13 @@ class AntigravityAgent:
                     raw = step["content"]
                     # Strip XML/HTML wrapper tags if any
                     import re
-                    clean = re.sub(r"<[^>]+>", "", raw).strip()
+                    clean = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", raw, flags=re.DOTALL)
+                    clean = re.sub(r"<system>.*?</system>", "", clean, flags=re.DOTALL)
+                    clean = re.sub(r"<[^>]+>", "", clean).strip()
                     first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
                     if first_line:
                         return first_line[:36] + ("..." if len(first_line) > 36 else "")
+
         except Exception as e:
             logger.debug(f"Error extracting title for {conversation_id}: {e}")
         return f"会话 ({conversation_id[:8]})"
