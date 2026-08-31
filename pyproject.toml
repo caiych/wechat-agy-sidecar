@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "wechat-agy-sidecar"
 version = "0.1.0"
-description = "A WeChat bridge sidecar connecting WeChat (iLink Bot protocol) directly with Google Antigravity SDK."
+description = "A WeChat bridge sidecar connecting WeChat (iLink Bot protocol) directly with Google Antigravity."
 readme = "README.md"
 authors = [
     { name = "caiych" }
@@ -25,9 +25,9 @@ classifiers = [
     "Topic :: Software Development :: Libraries :: Python Modules"
 ]
 dependencies = [
-    "google-antigravity",
     "requests>=2.28.0",
-    "qrcode[pil]>=7.4.2"
+    "qrcode[pil]>=7.4.2",
+    "cryptography>=41.0.0",
 ]
 
 [project.optional-dependencies]
@@ -42,3 +42,11 @@ wechat-agy-sidecar = "wechat_agy_sidecar.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
+ignore = ["E501"]

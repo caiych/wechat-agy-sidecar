@@ -1,16 +1,17 @@
 """
-Antigravity Agent Execution Bridge with Multi-Turn Conversation Threading.
-Seamlessly taps into the active logged-in AGY instance (OAuth / Ambient Session)
-or falls back to google-antigravity SDK when GEMINI_API_KEY is configured.
+Antigravity Agent Execution Bridge using native agentapi CLI.
+Enables programmatic multi-turn conversation threading, real-time response capture,
+and background event/timer streaming.
 """
 
 from __future__ import annotations
 
-import os
-import json
-import shutil
 import asyncio
+import json
 import logging
+import os
+import shutil
+import time
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -18,106 +19,247 @@ from wechat_agy_sidecar.config import SidecarConfig
 
 logger = logging.getLogger("wechat_agy_sidecar.agent")
 
-# Attempt SDK import
-HAS_SDK = False
-try:
-    from google.antigravity import Agent, LocalAgentConfig, CapabilitiesConfig
-    HAS_SDK = True
-except ImportError:
-    pass
+BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 
 
 class AntigravityAgent:
-    """Agent wrapper for Antigravity execution with persistent conversation threading."""
+    """
+    Agent wrapper using native agentapi CLI for conversation lifecycle and messaging.
+    """
 
     def __init__(self, config: SidecarConfig):
         self.config = config
-        self.agy_bin = self._find_agy_binary()
+        self.agentapi_bin = self._find_agentapi_binary()
+        logger.info(f"Initialized AntigravityAgent with binary: {self.agentapi_bin}")
 
-    def _find_agy_binary(self) -> Optional[str]:
-        """Finds the local agy executable from environment or standard paths."""
+    def _find_agentapi_binary(self) -> Optional[str]:
+        """Finds the agentapi executable."""
         candidates = [
+            shutil.which("agentapi"),
+            str(Path.home() / ".gemini" / "antigravity-cli" / "bin" / "agentapi"),
             os.environ.get("ANTIGRAVITY_AGENTAPI_EXE"),
-            str(Path.home() / ".local" / "bin" / "agy"),
-            shutil.which("agy"),
-            "/usr/local/bin/agy",
-            "/usr/bin/agy"
+            str(Path.home() / ".local" / "bin" / "agentapi"),
+            "/usr/local/bin/agentapi",
+            "/usr/bin/agentapi"
         ]
         for c in candidates:
             if c and os.path.isfile(c) and os.access(c, os.X_OK):
                 return c
         return None
 
+    def _get_transcript_path(self, conversation_id: str) -> Path:
+        return BRAIN_DIR / conversation_id / ".system_generated" / "logs" / "transcript.jsonl"
+
+    def extract_conversation_title(self, conversation_id: str) -> str:
+        """Extracts a short, human-readable title from the first turn of the transcript."""
+        t_file = self._get_transcript_path(conversation_id)
+        if not t_file.exists():
+            return f"会话 ({conversation_id[:8]})"
+        try:
+            for line in t_file.read_text(encoding="utf-8").strip().splitlines()[:10]:
+                step = json.loads(line)
+                if step.get("type") == "USER_INPUT" and step.get("content"):
+                    raw = step["content"]
+                    # Strip XML/HTML wrapper tags if any
+                    import re
+                    clean = re.sub(r"<[^>]+>", "", raw).strip()
+                    first_line = clean.splitlines()[0].strip() if clean.splitlines() else ""
+                    if first_line:
+                        return first_line[:36] + ("..." if len(first_line) > 36 else "")
+        except Exception as e:
+            logger.debug(f"Error extracting title for {conversation_id}: {e}")
+        return f"会话 ({conversation_id[:8]})"
+
+    def extract_last_message_preview(self, conversation_id: str, max_chars: int = 200) -> str:
+        """Extracts a preview snippet of the last meaningful message in the conversation."""
+        t_file = self._get_transcript_path(conversation_id)
+        if not t_file.exists():
+            return ""
+        try:
+            lines = t_file.read_text(encoding="utf-8").strip().splitlines()
+            for line in reversed(lines):
+                step = json.loads(line)
+                step_type = step.get("type", "")
+                content = step.get("content", "").strip()
+                if not content or step_type not in ["PLANNER_RESPONSE", "USER_INPUT"]:
+                    continue
+
+                # Remove system wrappers / metadata tags
+                import re
+                clean = re.sub(r"<SYSTEM_MESSAGE>.*?</SYSTEM_MESSAGE>", "", content, flags=re.DOTALL)
+                clean = re.sub(r"<[^>]+>", "", clean).strip()
+                clean = re.sub(r"^Created At:.*?Completed At:.*?\n", "", clean, flags=re.DOTALL).strip()
+                if not clean:
+                    continue
+
+                role = "🤖 AI" if step_type == "PLANNER_RESPONSE" else "👤 用户"
+                snippet = " ".join(clean.split())
+                if len(snippet) > max_chars:
+                    snippet = snippet[:max_chars] + "..."
+                return f"{role}: {snippet}"
+        except Exception as e:
+            logger.debug(f"Error extracting last message preview for {conversation_id}: {e}")
+        return ""
+
+    def list_all_recent_conversations(self, limit: int = 8) -> list[dict]:
+        """
+        Discovers all Antigravity conversations across IDE, CLI, and WeChat by scanning
+        the ambient brain directory, sorted by most recent activity timestamp.
+        """
+        if not BRAIN_DIR.exists():
+            return []
+
+        conv_candidates = []
+        try:
+            for item in BRAIN_DIR.iterdir():
+                if not item.is_dir() or item.name.startswith("."):
+                    continue
+                t_file = item / ".system_generated" / "logs" / "transcript.jsonl"
+                if not t_file.exists():
+                    continue
+                try:
+                    mtime = t_file.stat().st_mtime
+                    conv_candidates.append((mtime, item.name))
+                except Exception:
+                    continue
+        except Exception as e:
+            logger.error(f"Error scanning brain directory: {e}")
+            return []
+
+        conv_candidates.sort(key=lambda x: x[0], reverse=True)
+
+        results = []
+        for mtime, c_id in conv_candidates:
+            title = self.extract_conversation_title(c_id)
+            results.append({
+                "conv_id": c_id,
+                "title": title,
+                "updated_at": int(mtime)
+            })
+            if len(results) >= limit:
+                break
+        return results
+
+    def _count_transcript_lines(self, conversation_id: str) -> int:
+        t_file = self._get_transcript_path(conversation_id)
+        if not t_file.exists():
+            return 0
+        try:
+            return len(t_file.read_text(encoding="utf-8").strip().splitlines())
+        except Exception:
+            return 0
+
+    async def _wait_for_response(
+        self,
+        conversation_id: str,
+        start_line: int,
+        timeout: float = 60.0
+    ) -> str:
+        """
+        Waits for and extracts the assistant's planner response from transcript.jsonl.
+        """
+        t_file = self._get_transcript_path(conversation_id)
+        start_time = time.time()
+        last_content = ""
+
+        while time.time() - start_time < timeout:
+            await asyncio.sleep(0.5)
+            if not t_file.exists():
+                continue
+            try:
+                lines = t_file.read_text(encoding="utf-8").strip().splitlines()
+                if len(lines) > start_line:
+                    for line in lines[start_line:]:
+                        step = json.loads(line)
+                        if step.get("type") == "PLANNER_RESPONSE" and step.get("content"):
+                            content = step.get("content", "").strip()
+                            if content:
+                                last_content = content
+                                # If there are no active tool calls, this is the turn's final response
+                                if not step.get("tool_calls"):
+                                    return last_content
+            except Exception as e:
+                logger.debug(f"Error reading transcript: {e}")
+
+        return last_content or "（Antigravity 已处理该请求）"
+
     async def execute(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """
-        Executes a user prompt within a persistent conversation thread.
-        Returns:
-            (reply_text, conversation_id)
+        Executes a user prompt using agentapi.
+        If conversation_id is provided, calls `agentapi send-message`.
+        Otherwise, calls `agentapi new-conversation`.
         """
-        has_api_key = bool(os.environ.get("GEMINI_API_KEY") or getattr(self.config, "api_key", None))
+        if not self.agentapi_bin:
+            return "❌ [未找到 agentapi 可执行文件，请确保 Antigravity 环境已就绪]", conversation_id
 
-        # Mode A: If GEMINI_API_KEY is explicitly configured, use google-antigravity SDK
-        if has_api_key and HAS_SDK:
-            try:
-                logger.info(f"Executing prompt via SDK (conversation={conversation_id})...")
-                agent_config = LocalAgentConfig(
-                    system_instructions=self.config.system_instructions,
-                    capabilities=CapabilitiesConfig() if self.config.enable_write_tools else None,
-                    conversation_id=conversation_id
-                )
-                async with Agent(agent_config) as agent:
-                    response = await agent.chat(prompt)
-                    tokens = []
-                    async for token in response:
-                        tokens.append(token)
-                    full_reply = "".join(tokens).strip()
-                    # SDK conversation object maintains ID
-                    active_conv_id = getattr(agent, "conversation_id", conversation_id)
-                    return full_reply or "（Antigravity 执行完成，无输出）", active_conv_id
-            except Exception as e:
-                logger.warning(f"SDK execution failed: {e}. Falling back to ambient AGY instance...")
+        try:
+            if conversation_id:
+                start_line = self._count_transcript_lines(conversation_id)
+                logger.info(f"Sending message to conversation {conversation_id} via agentapi...")
+                cmd = [self.agentapi_bin, "send-message", conversation_id, prompt]
 
-        # Mode B: Ambient logged-in AGY instance (OAuth / Active Session with JSON format)
-        if self.agy_bin:
-            try:
-                logger.info(f"Executing prompt via logged-in AGY instance (conversation={conversation_id}): {self.agy_bin}")
-                cmd = [
-                    self.agy_bin,
-                    "--dangerously-skip-permissions",
-                    "--output-format", "json"
-                ]
-                if conversation_id:
-                    cmd.extend(["--conversation", conversation_id])
-                cmd.extend(["-p", prompt])
-                
+                env = os.environ.copy()
+                project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+                if project_id:
+                    env["AGENTAPI_PROJECT_ID"] = project_id
+                    logger.info(f"Using project ID: {project_id}")
+
                 proc = await asyncio.create_subprocess_exec(
                     *cmd,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    env=os.environ.copy()
+                    env=env
                 )
                 stdout, stderr = await proc.communicate()
-                stdout_str = stdout.decode("utf-8", errors="replace").strip()
-                stderr_str = stderr.decode("utf-8", errors="replace").strip()
+                if proc.returncode != 0:
+                    err_msg = stderr.decode("utf-8", errors="replace").strip()
+                    logger.error(f"agentapi send-message failed ({proc.returncode}): {err_msg}")
+                    # Fallback to creating a new conversation
+                    return await self._create_new_conversation(prompt)
 
-                if proc.returncode == 0 and stdout_str:
-                    try:
-                        data = json.loads(stdout_str)
-                        reply = data.get("response", "").strip()
-                        new_conv_id = data.get("conversation_id") or conversation_id
-                        return reply or "（Antigravity 执行完成，无输出）", new_conv_id
-                    except json.JSONDecodeError:
-                        return stdout_str, conversation_id
-                else:
-                    logger.error(f"AGY process exit code {proc.returncode}: {stderr_str}")
-                    return f"❌ [Antigravity 执行错误 (Code {proc.returncode})]\n{stderr_str}", conversation_id
+                reply = await self._wait_for_response(conversation_id, start_line)
+                return reply, conversation_id
+            else:
+                return await self._create_new_conversation(prompt)
 
-            except Exception as e:
-                logger.error(f"Failed to execute local AGY binary: {e}", exc_info=True)
-                return f"❌ [Antigravity 执行异常]\n{str(e)}", conversation_id
+        except Exception as e:
+            logger.error(f"Failed to execute agentapi: {e}", exc_info=True)
+            return f"❌ [Antigravity 执行异常]\n{e!s}", conversation_id
 
-        return (
-            "❌ [未找到可用的 Antigravity 执行引擎]\n"
-            "系统未找到已登录的 agy 二进制文件，也未设置 GEMINI_API_KEY 环境变量。",
-            None
+    async def _create_new_conversation(self, prompt: str) -> Tuple[str, Optional[str]]:
+        """
+        Creates a new conversation thread via `agentapi new-conversation`.
+        """
+        logger.info("Creating new conversation via agentapi...")
+        cmd = [self.agentapi_bin, "new-conversation", prompt]
+
+        env = os.environ.copy()
+        # Inject project ID from config or environment
+        project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+        if project_id:
+            env["AGENTAPI_PROJECT_ID"] = project_id
+            logger.info(f"Using project ID: {project_id}")
+
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env
         )
+        stdout, stderr = await proc.communicate()
+        out_str = stdout.decode("utf-8", errors="replace").strip()
+
+        if proc.returncode != 0:
+            err_msg = stderr.decode("utf-8", errors="replace").strip()
+            logger.error(f"agentapi new-conversation failed ({proc.returncode}): {err_msg}")
+            return f"❌ [创建会话失败]\n{err_msg}", None
+
+        try:
+            data = json.loads(out_str)
+            new_id = data["response"]["newConversation"]["conversationId"]
+            logger.info(f"New conversation created: {new_id}")
+            reply = await self._wait_for_response(new_id, 0)
+            return reply, new_id
+        except Exception as e:
+            logger.error(f"Failed to parse new-conversation output: {out_str}, err: {e}")
+            return out_str, None

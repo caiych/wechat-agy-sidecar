@@ -4,14 +4,14 @@ Configuration management for the WeChat Antigravity Sidecar.
 
 from __future__ import annotations
 
-import os
-import json
 import base64
+import json
+import os
 import random
-from pathlib import Path
+import time
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
-
+from pathlib import Path
+from typing import Dict, Optional
 
 DEFAULT_CONFIG_PATH = Path.home() / ".gemini" / "wechat_sidecar_config.json"
 DEFAULT_ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -34,7 +34,9 @@ class SidecarConfig:
     bot_agent: str = DEFAULT_BOT_AGENT
     system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS
     enable_write_tools: bool = True
+    project_id: str = ""
     user_conversations: Dict[str, str] = field(default_factory=dict)
+    conversation_history: Dict[str, list] = field(default_factory=dict)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
 
     @classmethod
@@ -60,7 +62,9 @@ class SidecarConfig:
                 bot_agent=data.get("bot_agent", DEFAULT_BOT_AGENT),
                 system_instructions=data.get("system_instructions") or DEFAULT_SYSTEM_INSTRUCTIONS,
                 enable_write_tools=data.get("enable_write_tools", True),
+                project_id=data.get("project_id", ""),
                 user_conversations=data.get("user_conversations", {}),
+                conversation_history=data.get("conversation_history", {}),
                 config_path=config_file
             )
             instance._ensure_uin()
@@ -88,7 +92,9 @@ class SidecarConfig:
             "bot_agent": self.bot_agent,
             "system_instructions": self.system_instructions,
             "enable_write_tools": self.enable_write_tools,
-            "user_conversations": self.user_conversations
+            "project_id": self.project_id,
+            "user_conversations": self.user_conversations,
+            "conversation_history": self.conversation_history
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2, ensure_ascii=False)
@@ -104,6 +110,30 @@ class SidecarConfig:
         if user_id in self.user_conversations:
             del self.user_conversations[user_id]
             self.save()
+
+    def record_conversation(self, user_id: str, conv_id: str, title: str = ""):
+        """Records a conversation in the history for /resume support."""
+        if user_id not in self.conversation_history:
+            self.conversation_history[user_id] = []
+        # Avoid duplicates
+        existing_ids = [c["conv_id"] for c in self.conversation_history[user_id]]
+        if conv_id not in existing_ids:
+            self.conversation_history[user_id].append({
+                "conv_id": conv_id,
+                "title": title,
+                "created_at": int(time.time())
+            })
+        else:
+            # Update title if provided
+            for c in self.conversation_history[user_id]:
+                if c["conv_id"] == conv_id and title:
+                    c["title"] = title
+        self.save()
+
+    def get_recent_conversations(self, user_id: str, n: int = 5) -> list:
+        """Returns the most recent N conversations for a user."""
+        history = self.conversation_history.get(user_id, [])
+        return history[-n:][::-1]  # Most recent first
 
     def get_auth_headers(self) -> Dict[str, str]:
         self._ensure_uin()

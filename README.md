@@ -4,9 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-A lightweight, robust sidecar daemon that connects **WeChat** directly with **Google Antigravity** (taps into ambient logged-in AGY instance or Python SDK).
-
-It implements the native WeChat **iLink Bot Protocol** (the exact same protocol utilized by OpenClaw's official WeChat channel) without requiring the full OpenClaw agent stack.
+A lightweight, robust native sidecar daemon that connects **WeChat** directly with **Google Antigravity** using the native `agentapi` CLI and WeChat iLink Bot Protocol.
 
 ---
 
@@ -16,15 +14,16 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 +-------------------+        HTTP Long-Polling (/getupdates)        +-----------------------------------+
 |                   | <-------------------------------------------- |  WeChat Antigravity Sidecar       |
 |  WeChat iLink API |                                               |  (wechat-agy-sidecar)             |
-| (ilinkai.weixin)  | --------------------------------------------> |  - Inbound Parser (msgs/item_list)|
+| (ilinkai.weixin)  | --------------------------------------------> |  - Inbound Parser (msgs/images)   |
 |                   |        HTTP POST (/sendmessage)               |  - Multi-Turn Thread Manager      |
-+-------------------+ <-------------------------------------------- +-----------------+-----------------+
+|                   | <-------------------------------------------- |  - Proactive Background Watcher   |
++-------------------+                                               +-----------------+-----------------+
                                                                                       |
-                                                                                      | Active AGY Instance / SDK
+                                                                                      | Native agentapi CLI (IPC)
                                                                                       v
                                                                     +-----------------------------------+
                                                                     |     Google Antigravity Engine     |
-                                                                    |      (agy CLI / Python SDK)       |
+                                                                    |        (agentapi / brain)         |
                                                                     +-----------------------------------+
 ```
 
@@ -32,13 +31,16 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 
 ## ✨ Features
 
+- **Native `agentapi` Bridge**: Direct integration via `agentapi new-conversation` and `agentapi send-message` for fast, headless multi-turn execution.
+- **Proactive Background Streaming**: Real-time trajectory watcher automatically relays Antigravity-initiated background events (e.g. scheduled timers via `schedule`, background subagent completions) directly to WeChat without requiring inbound user messages.
 - **Multi-Turn Persistent Threading**: Automatically preserves multi-turn conversation context per WeChat user across messages and daemon restarts.
 - **Thread Control Commands**:
   - `/new` (or `/reset`): Resets the conversation thread and starts fresh.
-  - `/new <prompt>` (or `/reset <prompt>`): Resets the conversation thread and immediately executes `<prompt>` in the new thread.
-- **Native Protocol Fidelity**: Implements the Tencent iLink Bot API (`ilink_bot_token`, `bot_agent`, `X-WECHAT-UIN`, `message_state: 2`).
-- **Interactive QR Onboarding**: Displays an in-terminal ASCII QR code on initial launch for seamless zero-config WeChat authorization.
-- **Ambient AGY Instance Integration**: Seamlessly taps into the logged-in local AGY instance (OAuth / personal login) with zero required API keys.
+  - `/new <prompt>`: Resets thread and immediately executes `<prompt>` in the new conversation.
+- **Multimodal CDN Decryption**:
+  - **Images**: Automatically downloads and decrypts Tencent CDN encrypted payloads (AES-128-ECB) so Antigravity can directly view and analyze user-submitted images.
+  - **Voice (Silk v3)**: Extracts WeChat ASR transcriptions and provides on-demand `download-media` CLI commands for raw audio inspection when needed.
+- **Native Antigravity Sidecar**: Configured via standard `sidecar.json` for discovery and lifecycle management by Antigravity runtime.
 - **Incremental Cursor Sync**: Persists `get_updates_buf` to ensure zero message loss and no duplicate responses.
 - **Typing Indicator**: Automatically sends `sendtyping` events while Antigravity generates code and reasoning steps.
 
@@ -46,20 +48,25 @@ It implements the native WeChat **iLink Bot Protocol** (the exact same protocol 
 
 ## 📦 Installation
 
-### Option 1: Modern Editable Install (Recommended)
+### Option 1: Automated One-Step Install (Recommended)
 
 ```bash
 git clone https://github.com/caiych/wechat-agy-sidecar.git
 cd wechat-agy-sidecar
 
-# Install with uv / pip
-pip install -e .
+# Run installer (sets up venv, installs dependencies, links CLI to ~/.local/bin, and registers sidecar)
+./install.sh
 ```
 
-### Option 2: Using requirements.txt
+### Option 2: Manual Install
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+.venv/bin/pip install -e .
+
+# Link CLI to user PATH for media download & tool commands
+mkdir -p ~/.local/bin
+ln -sf $(pwd)/.venv/bin/wechat-agy-sidecar ~/.local/bin/wechat-agy-sidecar
 ```
 
 ---
@@ -82,14 +89,20 @@ wechat-agy-sidecar --login
 * Tap **Confirm** on your phone.
 * Credentials are securely saved to `~/.gemini/wechat_sidecar_config.json`.
 
-### 2. Run as a Background Daemon
+### 2. Antigravity Native Sidecar (`sidecar.json`)
 
-```bash
-# Run with custom config or debug logs
-wechat-agy-sidecar --debug
+To enable native Antigravity lifecycle management, copy or symlink `sidecar.json` to `.agents/sidecars/wechat-agy-sidecar/sidecar.json` or `~/.gemini/config/sidecars/wechat-agy-sidecar/sidecar.json`.
 
-# Background execution via nohup / systemd
-nohup wechat-agy-sidecar > ~/.gemini/wechat_sidecar.log 2>&1 &
+```json
+{
+  "$schema": "https://antigravity.google/schemas/sidecar.json",
+  "name": "wechat-agy-sidecar",
+  "description": "WeChat Antigravity Bridge Sidecar Daemon for iLink Bot Protocol",
+  "command": "/path/to/wechat-agy-sidecar/.venv/bin/wechat-agy-sidecar",
+  "args": [],
+  "restart_policy": "always",
+  "enabled": true
+}
 ```
 
 ---
@@ -101,22 +114,37 @@ nohup wechat-agy-sidecar > ~/.gemini/wechat_sidecar.log 2>&1 &
 | *(Any text)* | Continues the active multi-turn conversation thread. | `帮我把刚才的函数改成异步版本` |
 | `/new` | Resets conversation thread and waits for new input. | `/new` |
 | `/new <prompt>` | Resets thread and immediately executes prompt in the new thread. | `/new 用 Go 写一个 HTTP 客户端` |
+| `/resume` (or `/history`) | Lists recent conversations with titles to select by replying with a number. | `/resume` |
+| `/resume <index\|id>` | Switches directly to the specified conversation number or UUID. | `/resume 2` |
 | `/reset` | Alias for `/new`. | `/reset` |
+| *(Image)* | Uploads image; automatically decrypted for agent inspection. | `[Image Attachment]` |
+| *(Voice)* | Voice input; passed with transcribed text and registered `media_id` for on-demand inspection. | `[Voice Input]` |
 
 ---
 
 ## 🧪 Development & Testing
 
 ```bash
-# Run tests
+# Run unit tests
 .venv/bin/python -m unittest discover -s tests -p "test_*.py"
+
+# Download & inspect media by registry ID
+wechat-agy-sidecar download-media voice_1001
+
+# Or direct URL/key mode (backward compatible)
+wechat-agy-sidecar download-media --url "<CDN_URL>" --key "<AES_KEY>" --output "/tmp/media.silk"
 ```
 
-## 📌 Known Issues & Roadmap
+---
 
-- **Sidebar Project Visibility**:
-  - *Current Behavior*: WeChat-initiated conversations default to the global `CLI project` (`default-cli-project`) scope in Antigravity. To view past conversations in the Antigravity UI sidebar, select the **CLI project** from the left-hand Projects list, or navigate directly via `conversation://<conversation_id>` links.
-  - *TODO / Roadmap*: Add configurable workspace binding (`--workspace-dir` / `workspace_path` in `wechat_sidecar_config.json`) so WeChat conversations can automatically bind to a specific project workspace.
+## 📌 Status & Roadmap
+
+- ✅ **Sidebar & Conversation Discovery**: Fully resolved with `agentapi` integration — conversations created via `agentapi new-conversation` are first-class Antigravity sessions and immediately accessible.
+- ✅ **Proactive Timer & Subagent Push**: Resolved via `proactive_event_watcher` reading real-time conversation trajectories.
+- ✅ **Voice Media Registry & CLI**: Clean metadata registry (`~/.gemini/wechat_media/registry.json`) for lazy audio inspection with zero token/arg clutter.
+- ✅ **Multi-Session Switcher (`/resume`)**: View recent conversation history and switch active threads across IDE, CLI, and WeChat.
+- ✅ **Project ID Routing**: Configure `WECHAT_SIDECAR_PROJECT_ID` or config `project_id` to route conversations to specific workspaces.
+- ⏳ **Native Permission Protocol Streaming**: Requires native Antigravity permission IPC bridge.
 
 ---
 

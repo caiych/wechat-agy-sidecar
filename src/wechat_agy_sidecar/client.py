@@ -5,15 +5,15 @@ Implements the exact protocol utilized by OpenClaw's WeChat channel.
 
 from __future__ import annotations
 
-import time
-import json
-import random
 import logging
+import random
+import time
 import urllib.parse
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
+
 from wechat_agy_sidecar.config import SidecarConfig
 
 logger = logging.getLogger("wechat_agy_sidecar.client")
@@ -87,7 +87,7 @@ class WeChatIlinkClient:
             if resp.status_code != 200:
                 logger.error(f"get_bot_qrcode failed with HTTP {resp.status_code}: {resp.text}")
                 return False, None, None
-            
+
             data = resp.json()
             qrcode_id = data.get("qrcode") or data.get("qrcode_id")
             qrcode_render_url = data.get("qrcode_img_content") or data.get("qrcode_img_url") or qrcode_id
@@ -140,13 +140,13 @@ class WeChatIlinkClient:
             data = resp.json()
             new_cursor = data.get("get_updates_buf") or self.config.get_updates_buf
             raw_msgs = data.get("msgs") or data.get("messages") or []
-            
+
             inbound_list: List[InboundMessage] = []
             for item in raw_msgs:
                 msg_id = str(item.get("msg_id") or item.get("id") or "")
                 from_user = str(item.get("from_user_id") or item.get("from_user") or "")
                 context_token = str(item.get("context_token") or "")
-                
+
                 # Extract content from item_list (text, image, voice, file, video)
                 text = ""
                 item_list = item.get("item_list", [])
@@ -164,11 +164,35 @@ class WeChatIlinkClient:
                     elif item_type == 2 or image_item:
                         has_media = True
                         logger.info(f"Received Image attachment: {image_item}")
-                        text += "[用户发送了一张图片 (Image)]\n"
+                        from wechat_agy_sidecar.media import decrypt_and_save_media
+                        saved_path = decrypt_and_save_media(image_item, msg_id)
+                        if saved_path:
+                            text += f"[用户发送了一张图片，已解密保存至本地文件: file://{saved_path.resolve()}]\n请分析并查看此图片内容。\n"
+                        else:
+                            text += "[用户发送了一张图片 (Image)]\n"
                     elif item_type == 3 or voice_item:
                         has_media = True
                         logger.info(f"Received Voice message: {voice_item}")
-                        text += "[用户发送了一条语音消息 (Voice)]\n"
+                        transcribed_text = (voice_item.get("text") or item.get("text") or "").strip()
+                        media_info = voice_item.get("media", {})
+                        media_url = media_info.get("full_url") or voice_item.get("url") or ""
+                        raw_key = voice_item.get("aeskey") or media_info.get("aes_key") or voice_item.get("aes_key") or media_info.get("aeskey") or ""
+
+                        # Register in media registry for clean CLI access
+                        voice_media_id = f"voice_{msg_id or int(time.time())}"
+                        if media_url and raw_key:
+                            from wechat_agy_sidecar.media import register_media
+                            register_media(voice_media_id, "voice", media_url, raw_key, {"transcription": transcribed_text})
+
+                        voice_prompt = (
+                            f"[用户发送了一条语音消息 (Voice Input)]\n"
+                            f"微信转写文本: \"{transcribed_text or '（微信未返回自动转写文本）'}\"\n"
+                            f"原始音频 ID: {voice_media_id}\n"
+                            f"检视命令: `wechat-agy-sidecar download-media {voice_media_id}`\n"
+                            f"（提示：默认请直接基于上述微信转写文本进行回答。若转写内容疑似有误、不完整，或用户要求复核原始语音时，可运行上述命令下载原始音频。）\n\n"
+                            f"用户指令: {transcribed_text or '（微信未返回有效转写文本，如需处理请运行上述命令下载原始音频）'}\n"
+                        )
+                        text += voice_prompt
                     elif item_type == 4 or file_item:
                         has_media = True
                         file_name = file_item.get("file_name", "未知文件")
