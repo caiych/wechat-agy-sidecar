@@ -118,6 +118,38 @@ cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + '\n', encod
 "
 echo "⚙️  Enabled sidecar in: ~/.gemini/config/config.json"
 
+# 7. Configure and Enable Systemd User Service
+SYSTEMD_USER_DIR="$HOME/.config/systemd/user"
+mkdir -p "$SYSTEMD_USER_DIR"
+cat > "$SYSTEMD_USER_DIR/wechat-agy-sidecar.service" <<EOF
+[Unit]
+Description=WeChat Antigravity Sidecar Daemon
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$SCRIPT_DIR
+ExecStart=$USER_BIN_DIR/wechat-agy-sidecar
+Restart=always
+RestartSec=3
+TimeoutStopSec=3
+Environment=PATH=$USER_BIN_DIR:/usr/local/bin:/usr/bin:/bin
+Environment=HOME=$HOME
+Environment=ANTIGRAVITY_AGENTAPI_EXE=$USER_BIN_DIR/agentapi
+Environment=WECHAT_SIDECAR_CONFIG=$HOME/.gemini/wechat_sidecar_config.json
+
+
+[Install]
+WantedBy=default.target
+EOF
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl --user daemon-reload 2>/dev/null || true
+    systemctl --user enable --now wechat-agy-sidecar.service 2>/dev/null || true
+    echo "⚙️  Configured & enabled systemd user service: wechat-agy-sidecar.service"
+fi
+
+
 
 echo ""
 echo "========================================================"
