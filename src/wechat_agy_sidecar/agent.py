@@ -29,8 +29,8 @@ class AntigravityAgent:
 
     def __init__(self, config: SidecarConfig):
         self.config = config
+        self._agent_bin = self._find_agentapi_binary() or self._find_agy_binary()
         self.agy_bin = self._find_agy_binary()
-        self._agent_bin = self.agy_bin or self._find_agentapi_binary()
         logger.info(f"Initialized AntigravityAgent with binary: {self._agent_bin} (is_agy={self.is_agy})")
 
     @property
@@ -244,6 +244,16 @@ class AntigravityAgent:
         token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
         if token:
             return token
+
+        token_file = Path.home() / ".gemini" / "antigravity_csrf_token"
+        if token_file.exists():
+            try:
+                val = token_file.read_text(encoding="utf-8").strip()
+                if val:
+                    return val
+            except Exception:
+                pass
+
         try:
             import urllib.request
             import re

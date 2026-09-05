@@ -136,7 +136,7 @@ TimeoutStopSec=3
 Environment=PATH=$USER_BIN_DIR:/usr/local/bin:/usr/bin:/bin
 Environment=HOME=$HOME
 Environment=ANTIGRAVITY_AGY_EXE=$USER_BIN_DIR/agy
-Environment=ANTIGRAVITY_AGENTAPI_EXE=$USER_BIN_DIR/agy
+Environment=ANTIGRAVITY_AGENTAPI_EXE=$USER_BIN_DIR/agentapi
 Environment=WECHAT_SIDECAR_CONFIG=$HOME/.gemini/wechat_sidecar_config.json
 
 

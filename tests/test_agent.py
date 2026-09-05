@@ -327,25 +327,35 @@ def test_find_default_project_id(mock_config, temp_dir):
         assert agent._find_default_project_id() == "discovered-project-123"
 
 
-def test_get_csrf_token(mock_config):
+def test_get_csrf_token(mock_config, temp_dir):
     agent = AntigravityAgent(mock_config)
 
     # 1. When ANTIGRAVITY_CSRF_TOKEN is in environment
     with patch.dict("os.environ", {"ANTIGRAVITY_CSRF_TOKEN": "token-from-env"}):
         assert agent._get_csrf_token() == "token-from-env"
 
-    # 2. When ANTIGRAVITY_CSRF_TOKEN is not in environment, fetch from HTTP
+    # 2. When token file exists in ~/.gemini/antigravity_csrf_token
+    mock_gemini = temp_dir / ".gemini"
+    mock_gemini.mkdir(parents=True, exist_ok=True)
+    (mock_gemini / "antigravity_csrf_token").write_text("token-from-file-5678", encoding="utf-8")
+    with patch.dict("os.environ", {}, clear=True), patch("pathlib.Path.home", return_value=temp_dir):
+        assert agent._get_csrf_token() == "token-from-file-5678"
+
+    # 3. When token file does not exist, fetch from HTTP
+    (mock_gemini / "antigravity_csrf_token").unlink()
     html_payload = b'<html><script>window.__APP_CONFIG__ = {"csrfToken":"token-from-http-1234-abcd"};</script></html>'
     mock_response = MagicMock()
     mock_response.read.return_value = html_payload
     mock_response.__enter__.return_value = mock_response
 
     with patch.dict("os.environ", {}, clear=True), \
+         patch("pathlib.Path.home", return_value=temp_dir), \
          patch("urllib.request.urlopen", return_value=mock_response):
         assert agent._get_csrf_token("localhost:4400") == "token-from-http-1234-abcd"
 
-    # 3. When fetch fails (e.g. urllib raises Exception)
+    # 4. When fetch fails (e.g. urllib raises Exception)
     with patch.dict("os.environ", {}, clear=True), \
+         patch("pathlib.Path.home", return_value=temp_dir), \
          patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
         assert agent._get_csrf_token("localhost:4400") == ""
 
