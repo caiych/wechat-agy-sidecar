@@ -4,7 +4,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Code Style: Ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-A lightweight, robust native sidecar daemon that connects **WeChat** directly with **Google Antigravity** using the native `agentapi` CLI and WeChat iLink Bot Protocol.
+A lightweight, robust native sidecar daemon that connects **WeChat** directly with **Google Antigravity** using native `agy` CLI / `agentapi` and WeChat iLink Bot Protocol.
 
 ---
 
@@ -19,11 +19,11 @@ A lightweight, robust native sidecar daemon that connects **WeChat** directly wi
 |                   | <-------------------------------------------- |  - Proactive Background Watcher   |
 +-------------------+                                               +-----------------+-----------------+
                                                                                       |
-                                                                                      | Native agentapi CLI (IPC)
+                                                                                      | Native IPC (agy / agentapi)
                                                                                       v
                                                                     +-----------------------------------+
                                                                     |     Google Antigravity Engine     |
-                                                                    |        (agentapi / brain)         |
+                                                                    |        (brain / transcripts)      |
                                                                     +-----------------------------------+
 ```
 
@@ -31,7 +31,10 @@ A lightweight, robust native sidecar daemon that connects **WeChat** directly wi
 
 ## ✨ Features
 
-- **Native `agentapi` Bridge**: Direct integration via `agentapi new-conversation` and `agentapi send-message` for fast, headless multi-turn execution.
+- **Dual Execution Engine (`agy` & `agentapi`)**:
+  - **`agy` Engine (Default)**: Rock-solid usability without CSRF token maintenance; 100% immune to Language Server nightly restarts.
+  - **`agentapi` Engine**: Connects via local RPC daemon so conversations sync live to the Remote Control Web UI (`https://antigravity.google.com`).
+  - **Smart Fallback**: Automatic, zero-latency fallback to `agy` if `agentapi` encounters token expiration or connection drops.
 - **Proactive Background Streaming**: Real-time trajectory watcher automatically relays Antigravity-initiated background events (e.g. scheduled timers via `schedule`, background subagent completions) directly to WeChat without requiring inbound user messages.
 - **Multi-Turn Persistent Threading**: Automatically preserves multi-turn conversation context per WeChat user across messages and daemon restarts.
 - **Thread Control Commands**:
@@ -134,6 +137,13 @@ wechat-agy-sidecar download-media voice_1001
 # Or direct URL/key mode (backward compatible)
 wechat-agy-sidecar download-media --url "<CDN_URL>" --key "<AES_KEY>" --output "/tmp/media.silk"
 ```
+
+---
+
+## 📖 Integration Architecture & Dual Engines
+
+For an in-depth breakdown of the architecture, comparing `agy` vs `agentapi`, CSRF token lifecycle management, and automatic fault-tolerance fallback, see:
+👉 [**Antigravity Engine Integration & Architecture Guide (`docs/ANTIGRAVITY_INTEGRATION.md`)](docs/ANTIGRAVITY_INTEGRATION.md)
 
 ---
 

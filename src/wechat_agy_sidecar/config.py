@@ -35,6 +35,7 @@ class SidecarConfig:
     system_instructions: str = DEFAULT_SYSTEM_INSTRUCTIONS
     enable_write_tools: bool = True
     project_id: str = ""
+    engine: str = "agy"
     user_conversations: Dict[str, str] = field(default_factory=dict)
     conversation_history: Dict[str, list] = field(default_factory=dict)
     config_path: Path = field(default_factory=lambda: DEFAULT_CONFIG_PATH)
@@ -63,6 +64,7 @@ class SidecarConfig:
                 system_instructions=data.get("system_instructions") or DEFAULT_SYSTEM_INSTRUCTIONS,
                 enable_write_tools=data.get("enable_write_tools", True),
                 project_id=data.get("project_id", ""),
+                engine=data.get("engine") or os.getenv("WECHAT_AGENT_ENGINE", "agy"),
                 user_conversations=data.get("user_conversations", {}),
                 conversation_history=data.get("conversation_history", {}),
                 config_path=config_file
@@ -93,6 +95,7 @@ class SidecarConfig:
             "system_instructions": self.system_instructions,
             "enable_write_tools": self.enable_write_tools,
             "project_id": self.project_id,
+            "engine": self.engine,
             "user_conversations": self.user_conversations,
             "conversation_history": self.conversation_history
         }

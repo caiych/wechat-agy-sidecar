@@ -448,3 +448,62 @@ async def test_execute_agy_fallback_on_error(mock_config):
         assert conv_id == "conv_agy_fallback_200"
         assert reply == "Recovered into new conversation!"
 
+
+def test_dual_engine_config_selection(mock_config, temp_dir):
+    fake_agy = temp_dir / "fake_agy"
+    fake_agy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_agy.chmod(0o755)
+
+    fake_agentapi = temp_dir / "fake_agentapi"
+    fake_agentapi.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_agentapi.chmod(0o755)
+
+    with patch.dict("os.environ", {
+        "ANTIGRAVITY_AGY_EXE": str(fake_agy),
+        "ANTIGRAVITY_AGENTAPI_EXE": str(fake_agentapi)
+    }):
+        # 1. Default engine is agy
+        mock_config.engine = "agy"
+        agent = AntigravityAgent(mock_config)
+        assert agent.is_agy is True
+        assert agent.agent_bin == str(fake_agy)
+
+        # 2. Configured for agentapi
+        mock_config.engine = "agentapi"
+        agent2 = AntigravityAgent(mock_config)
+        assert agent2.is_agy is False
+        assert agent2.agent_bin == str(fake_agentapi)
+
+
+@pytest.mark.asyncio
+async def test_execute_agentapi_csrf_failure_fallback_to_agy(mock_config, temp_dir):
+    fake_agy = temp_dir / "fake_agy"
+    fake_agy.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    fake_agy.chmod(0o755)
+
+    mock_config.engine = "agentapi"
+    agent = AntigravityAgent(mock_config)
+    agent.agentapi_bin = "/mock/bin/agentapi"
+    agent.agy_bin = str(fake_agy)
+
+    # agentapi fails with missing CSRF token
+    csrf_fail_proc = FakeProcess(
+        returncode=1,
+        stderr=b"failed to fetch available models: rpc error: code = Unauthenticated desc = missing CSRF token"
+    )
+    # agy succeeds
+    agy_success_proc = FakeProcess(
+        returncode=0,
+        stdout=json.dumps({
+            "conversation_id": "conv_recovered_agy_1",
+            "status": "SUCCESS",
+            "response": "Fallback response from agy engine!"
+        }).encode("utf-8")
+    )
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[csrf_fail_proc, agy_success_proc]):
+        reply, conv_id = await agent.execute("Hello after restart", conversation_id=None)
+        assert conv_id == "conv_recovered_agy_1"
+        assert reply == "Fallback response from agy engine!"
+
+

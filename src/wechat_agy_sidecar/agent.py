@@ -24,14 +24,27 @@ BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 
 class AntigravityAgent:
     """
-    Agent wrapper using agy CLI (with fallback to agentapi) for conversation lifecycle and messaging.
+    Agent wrapper supporting both agy CLI (default, usability-first) and agentapi (Remote Control UI sync),
+    with intelligent fallback on authentication/CSRF expiration.
     """
 
     def __init__(self, config: SidecarConfig):
         self.config = config
-        self._agent_bin = self._find_agentapi_binary() or self._find_agy_binary()
-        self.agy_bin = self._find_agy_binary()
-        logger.info(f"Initialized AntigravityAgent with binary: {self._agent_bin} (is_agy={self.is_agy})")
+        self._agy_bin = self._find_agy_binary()
+        self._agentapi_bin = self._find_agentapi_binary()
+
+        # Engine selection: "agy" (default) | "agentapi" | "auto"
+        engine_pref = (getattr(config, "engine", "") or os.environ.get("WECHAT_AGENT_ENGINE", "agy")).lower()
+        self.engine = engine_pref if engine_pref in ["agy", "agentapi", "auto"] else "agy"
+
+        if self.engine == "agentapi" and self._agentapi_bin:
+            self._agent_bin = self._agentapi_bin
+        else:
+            self._agent_bin = self._agy_bin or self._agentapi_bin
+
+        logger.info(
+            f"Initialized AntigravityAgent (engine={self.engine}, binary={self._agent_bin}, is_agy={self.is_agy})"
+        )
 
     @property
     def agent_bin(self) -> Optional[str]:
@@ -50,8 +63,22 @@ class AntigravityAgent:
         self._agent_bin = value
 
     @property
+    def agy_bin(self) -> Optional[str]:
+        return self._agy_bin
+
+    @agy_bin.setter
+    def agy_bin(self, value: Optional[str]) -> None:
+        self._agy_bin = value
+
+    @property
     def is_agy(self) -> bool:
-        return bool(self._agent_bin and Path(self._agent_bin).name == "agy")
+        if self._agent_bin:
+            name = Path(self._agent_bin).name.lower()
+            if "agentapi" in name:
+                return False
+            if "agy" in name:
+                return True
+        return self.engine != "agentapi"
 
     def _find_agy_binary(self) -> Optional[str]:
         """Finds the agy CLI executable."""
@@ -381,18 +408,53 @@ class AntigravityAgent:
 
     async def execute(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """
-        Executes a user prompt using agy CLI (or fallback to agentapi).
+        Executes a user prompt using agy CLI or agentapi with intelligent fallback.
         """
         if not self.agent_bin:
             return "❌ [未找到 agentapi 可执行文件，请确保 Antigravity 环境已就绪]", conversation_id
 
         try:
             if self.is_agy:
-                return await self._execute_agy(prompt, conversation_id=conversation_id)
+                reply, new_id = await self._execute_agy(prompt, conversation_id=conversation_id)
+                # If agy fails completely and agentapi is available, attempt fallback
+                if reply.startswith("❌") and self._find_agentapi_binary():
+                    logger.warning("agy execution failed; attempting fallback to agentapi...")
+                    fb_agent = self._find_agentapi_binary()
+                    orig_bin = self._agent_bin
+                    try:
+                        self._agent_bin = fb_agent
+                        fb_reply, fb_id = await self._execute_agentapi(prompt, conversation_id=conversation_id)
+                        if not fb_reply.startswith("❌"):
+                            return fb_reply, fb_id
+                    finally:
+                        self._agent_bin = orig_bin
+                return reply, new_id
             else:
-                return await self._execute_agentapi(prompt, conversation_id=conversation_id)
+                reply, new_id = await self._execute_agentapi(prompt, conversation_id=conversation_id)
+                # If agentapi failed due to CSRF or auth error, automatically fallback to agy
+                is_auth_error = any(x in reply for x in ["missing CSRF token", "Unauthenticated", "CSRF"])
+                if is_auth_error and (self.agy_bin or self._find_agy_binary()):
+                    logger.warning("agentapi failed with CSRF/auth error; automatically falling back to agy engine...")
+                    orig_bin = self._agent_bin
+                    try:
+                        self._agent_bin = self.agy_bin or self._find_agy_binary()
+                        return await self._execute_agy(prompt, conversation_id=conversation_id)
+                    finally:
+                        self._agent_bin = orig_bin
+                return reply, new_id
         except Exception as e:
             logger.error(f"Failed to execute agent: {e}", exc_info=True)
+            # If agentapi crashed or raised exception, fallback to agy if available
+            if not self.is_agy and (self.agy_bin or self._find_agy_binary()):
+                logger.warning(f"agentapi raised exception {e}; falling back to agy engine...")
+                orig_bin = self._agent_bin
+                try:
+                    self._agent_bin = self.agy_bin or self._find_agy_binary()
+                    return await self._execute_agy(prompt, conversation_id=conversation_id)
+                except Exception as fb_err:
+                    logger.error(f"Fallback to agy also failed: {fb_err}")
+                finally:
+                    self._agent_bin = orig_bin
             return f"❌ [Antigravity 执行异常]\n{e!s}", conversation_id
 
     async def _execute_agentapi(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
@@ -416,6 +478,8 @@ class AntigravityAgent:
                 if proc.returncode != 0:
                     err_msg = stderr.decode("utf-8", errors="replace").strip()
                     logger.error(f"agentapi send-message failed ({proc.returncode}): {err_msg}")
+                    if any(x in err_msg for x in ["missing CSRF token", "Unauthenticated", "CSRF"]):
+                        return f"❌ [CSRF Token 失效]\n{err_msg}", conversation_id
                     # Fallback to creating a new conversation
                     return await self._create_new_conversation(prompt)
 
