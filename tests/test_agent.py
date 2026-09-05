@@ -7,7 +7,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -303,3 +303,138 @@ async def test_execute_missing_binary(mock_config):
     reply, conv_id = await agent.execute("Hello", conversation_id="conv_123")
     assert "未找到 agentapi 可执行文件" in reply
     assert conv_id == "conv_123"
+
+
+def test_find_default_project_id(mock_config, temp_dir):
+    agent = AntigravityAgent(mock_config)
+    mock_projects_dir = temp_dir / ".gemini" / "config" / "projects"
+    mock_projects_dir.mkdir(parents=True, exist_ok=True)
+
+    with patch("pathlib.Path.home", return_value=temp_dir):
+        # Case 1: Empty projects dir -> default
+        assert agent._find_default_project_id() == "default-cli-project"
+
+        # Case 2: Only default-cli-project.json -> ignored, returns default
+        (mock_projects_dir / "default-cli-project.json").write_text('{"id": "ignored-id"}', encoding="utf-8")
+        assert agent._find_default_project_id() == "default-cli-project"
+
+        # Case 3: Malformed json -> ignored
+        (mock_projects_dir / "bad.json").write_text("invalid json", encoding="utf-8")
+        assert agent._find_default_project_id() == "default-cli-project"
+
+        # Case 4: Valid project json -> returns its id
+        (mock_projects_dir / "my_proj.json").write_text('{"id": "discovered-project-123"}', encoding="utf-8")
+        assert agent._find_default_project_id() == "discovered-project-123"
+
+
+def test_get_csrf_token(mock_config):
+    agent = AntigravityAgent(mock_config)
+
+    # 1. When ANTIGRAVITY_CSRF_TOKEN is in environment
+    with patch.dict("os.environ", {"ANTIGRAVITY_CSRF_TOKEN": "token-from-env"}):
+        assert agent._get_csrf_token() == "token-from-env"
+
+    # 2. When ANTIGRAVITY_CSRF_TOKEN is not in environment, fetch from HTTP
+    html_payload = b'<html><script>window.__APP_CONFIG__ = {"csrfToken":"token-from-http-1234-abcd"};</script></html>'
+    mock_response = MagicMock()
+    mock_response.read.return_value = html_payload
+    mock_response.__enter__.return_value = mock_response
+
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("urllib.request.urlopen", return_value=mock_response):
+        assert agent._get_csrf_token("localhost:4400") == "token-from-http-1234-abcd"
+
+    # 3. When fetch fails (e.g. urllib raises Exception)
+    with patch.dict("os.environ", {}, clear=True), \
+         patch("urllib.request.urlopen", side_effect=Exception("Connection refused")):
+        assert agent._get_csrf_token("localhost:4400") == ""
+
+
+def test_prepare_agentapi_env(mock_config):
+    agent = AntigravityAgent(mock_config)
+
+    with patch.dict("os.environ", {
+        "ANTIGRAVITY_AGENT": "1",
+        "ANTIGRAVITY_CONVERSATION_ID": "conv_parent",
+        "ANTIGRAVITY_LS_ADDRESS": "127.0.0.1:4400",
+        "ANTIGRAVITY_CSRF_TOKEN": "csrf-secret-999"
+    }):
+        env = agent._prepare_agentapi_env()
+        # Ensure parent scoping variables are stripped
+        assert "ANTIGRAVITY_AGENT" not in env
+        assert "ANTIGRAVITY_CONVERSATION_ID" not in env
+        # Ensure project and CSRF variables are set
+        assert env["AGENTAPI_PROJECT_ID"] == "test-project-alpha"
+        assert env["ANTIGRAVITY_LS_ADDRESS"] == "127.0.0.1:4400"
+        assert env["ANTIGRAVITY_CSRF_TOKEN"] == "csrf-secret-999"
+
+
+@pytest.mark.asyncio
+async def test_execute_agy_new_conversation(mock_config):
+    agent = AntigravityAgent(mock_config)
+    agent.agent_bin = "/usr/local/bin/agy"
+
+    agy_output = json.dumps({
+        "conversation_id": "conv_agy_test_100",
+        "status": "SUCCESS",
+        "response": "Hello from native agy CLI!"
+    })
+    mock_proc = FakeProcess(returncode=0, stdout=agy_output.encode("utf-8"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_subproc:
+        reply, conv_id = await agent.execute("Hi there", conversation_id=None)
+        assert conv_id == "conv_agy_test_100"
+        assert reply == "Hello from native agy CLI!"
+
+        mock_subproc.assert_called_once()
+        args, kwargs = mock_subproc.call_args
+        assert args[0] == "/usr/local/bin/agy"
+        assert "--dangerously-skip-permissions" in args
+        assert "--output-format" in args
+        assert "json" in args
+        assert "--print=Hi there" in args
+
+
+@pytest.mark.asyncio
+async def test_execute_agy_continuation(mock_config):
+    agent = AntigravityAgent(mock_config)
+    agent.agent_bin = "/usr/local/bin/agy"
+
+    agy_output = json.dumps({
+        "conversation_id": "conv_agy_test_100",
+        "status": "SUCCESS",
+        "response": "Turn 2 continued response!"
+    })
+    mock_proc = FakeProcess(returncode=0, stdout=agy_output.encode("utf-8"))
+
+    with patch("asyncio.create_subprocess_exec", return_value=mock_proc) as mock_subproc:
+        reply, conv_id = await agent.execute("Turn 2 prompt", conversation_id="conv_agy_test_100")
+        assert conv_id == "conv_agy_test_100"
+        assert reply == "Turn 2 continued response!"
+
+        mock_subproc.assert_called_once()
+        args, kwargs = mock_subproc.call_args
+        assert "--conversation=conv_agy_test_100" in args
+        assert "--print=Turn 2 prompt" in args
+
+
+@pytest.mark.asyncio
+async def test_execute_agy_fallback_on_error(mock_config):
+    agent = AntigravityAgent(mock_config)
+    agent.agent_bin = "/usr/local/bin/agy"
+
+    fail_proc = FakeProcess(returncode=1, stderr=b"Conversation not found")
+    new_proc = FakeProcess(
+        returncode=0,
+        stdout=json.dumps({
+            "conversation_id": "conv_agy_fallback_200",
+            "status": "SUCCESS",
+            "response": "Recovered into new conversation!"
+        }).encode("utf-8")
+    )
+
+    with patch("asyncio.create_subprocess_exec", side_effect=[fail_proc, new_proc]):
+        reply, conv_id = await agent.execute("Recover prompt", conversation_id="stale_conv_id")
+        assert conv_id == "conv_agy_fallback_200"
+        assert reply == "Recovered into new conversation!"
+

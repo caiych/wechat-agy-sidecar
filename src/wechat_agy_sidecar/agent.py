@@ -24,13 +24,48 @@ BRAIN_DIR = Path.home() / ".gemini" / "antigravity-cli" / "brain"
 
 class AntigravityAgent:
     """
-    Agent wrapper using native agentapi CLI for conversation lifecycle and messaging.
+    Agent wrapper using agy CLI (with fallback to agentapi) for conversation lifecycle and messaging.
     """
 
     def __init__(self, config: SidecarConfig):
         self.config = config
-        self.agentapi_bin = self._find_agentapi_binary()
-        logger.info(f"Initialized AntigravityAgent with binary: {self.agentapi_bin}")
+        self.agy_bin = self._find_agy_binary()
+        self._agent_bin = self.agy_bin or self._find_agentapi_binary()
+        logger.info(f"Initialized AntigravityAgent with binary: {self._agent_bin} (is_agy={self.is_agy})")
+
+    @property
+    def agent_bin(self) -> Optional[str]:
+        return self._agent_bin
+
+    @agent_bin.setter
+    def agent_bin(self, value: Optional[str]) -> None:
+        self._agent_bin = value
+
+    @property
+    def agentapi_bin(self) -> Optional[str]:
+        return self._agent_bin
+
+    @agentapi_bin.setter
+    def agentapi_bin(self, value: Optional[str]) -> None:
+        self._agent_bin = value
+
+    @property
+    def is_agy(self) -> bool:
+        return bool(self._agent_bin and Path(self._agent_bin).name == "agy")
+
+    def _find_agy_binary(self) -> Optional[str]:
+        """Finds the agy CLI executable."""
+        candidates = [
+            os.environ.get("ANTIGRAVITY_AGY_EXE"),
+            shutil.which("agy"),
+            str(Path.home() / ".local" / "bin" / "agy"),
+            "/usr/local/bin/agy",
+            "/usr/bin/agy",
+        ]
+        for c in candidates:
+            if c and os.path.isfile(c) and os.access(c, os.X_OK):
+                return c
+        return None
 
     def _find_agentapi_binary(self) -> Optional[str]:
         """Finds the agentapi executable."""
@@ -189,39 +224,176 @@ class AntigravityAgent:
 
         return last_content or "（Antigravity 已处理该请求）"
 
+    def _find_default_project_id(self) -> str:
+        """Fallback helper to auto-discover project ID from ~/.gemini/config/projects/."""
+        projects_dir = Path.home() / ".gemini" / "config" / "projects"
+        if projects_dir.exists():
+            for p_file in projects_dir.glob("*.json"):
+                if p_file.name == "default-cli-project.json":
+                    continue
+                try:
+                    data = json.loads(p_file.read_text(encoding="utf-8"))
+                    p_id = data.get("id")
+                    if p_id:
+                        return p_id
+                except Exception:
+                    continue
+        return "default-cli-project"
+
+    def _get_csrf_token(self, ls_address: str = "localhost:4400") -> str:
+        token = os.environ.get("ANTIGRAVITY_CSRF_TOKEN", "")
+        if token:
+            return token
+        try:
+            import urllib.request
+            import re
+            url = f"http://{ls_address}/"
+            req = urllib.request.Request(url)
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                html = resp.read().decode("utf-8", errors="replace")
+                match = re.search(r'csrfToken["\']?\s*[:=]\s*["\']([^"\']+)["\']', html)
+                if not match:
+                    match = re.search(r'csrfToken[\":\s]+([a-zA-Z0-9_\-]+)', html)
+                if match:
+                    return match.group(1)
+        except Exception as e:
+            logger.debug(f"Failed to fetch CSRF token from {ls_address}: {e}")
+        return ""
+
     def _prepare_agentapi_env(self) -> dict:
         """Constructs a clean environment for agentapi child process, stripping parent caller scoping."""
         env = os.environ.copy()
         for var in [
+            "ANTIGRAVITY_AGENT",
             "ANTIGRAVITY_CONVERSATION_ID",
             "ANTIGRAVITY_SOURCE_METADATA",
             "ANTIGRAVITY_TRAJECTORY_ID",
+            "INVOCATION_ID",
             "ANTIGRAVITY_PROJECT_ID",
             "AGENTAPI_PROJECT_ID",
         ]:
             env.pop(var, None)
 
-        project_id = self.config.project_id or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+        project_id = (
+            self.config.project_id
+            or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+            or self._find_default_project_id()
+        )
         if project_id:
             env["AGENTAPI_PROJECT_ID"] = project_id
             env["ANTIGRAVITY_PROJECT_ID"] = project_id
             logger.info(f"Using project ID: {project_id}")
+
+        ls_address = os.environ.get("ANTIGRAVITY_LS_ADDRESS", "localhost:4400")
+        env["ANTIGRAVITY_LS_ADDRESS"] = ls_address
+
+        csrf_token = self._get_csrf_token(ls_address)
+        if csrf_token:
+            env["ANTIGRAVITY_CSRF_TOKEN"] = csrf_token
+
         return env
+
+
+
+    async def _execute_agy(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
+        """
+        Executes a user prompt using agy CLI with non-interactive --print mode and JSON output.
+        """
+        cmd = [
+            self.agent_bin,
+            "--dangerously-skip-permissions",
+            "--output-format", "json",
+        ]
+        project_id = (
+            self.config.project_id
+            or os.environ.get("WECHAT_SIDECAR_PROJECT_ID", "")
+            or self._find_default_project_id()
+        )
+        if project_id and project_id != "default-cli-project":
+            cmd.append(f"--project={project_id}")
+
+        if conversation_id:
+            cmd.append(f"--conversation={conversation_id}")
+
+        cmd.append(f"--print={prompt}")
+
+        env = self._prepare_agentapi_env()
+
+        logger.info(f"Executing agy CLI (conv={conversation_id})...")
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env
+        )
+        stdout, stderr = await proc.communicate()
+        out_str = stdout.decode("utf-8", errors="replace").strip()
+        err_str = stderr.decode("utf-8", errors="replace").strip()
+
+        if proc.returncode != 0:
+            logger.error(f"agy execution failed ({proc.returncode}): stdout={out_str}, stderr={err_str}")
+            if conversation_id:
+                logger.warning(f"Continuation of conversation {conversation_id} failed, falling back to new conversation...")
+                return await self._execute_agy(prompt, conversation_id=None)
+            err_msg = (out_str + "\n" + err_str).strip()
+            return f"❌ [Antigravity 执行失败]\n{err_msg}", None
+
+        try:
+            data = json.loads(out_str)
+            if data.get("status") == "ERROR":
+                err = data.get("error", "Unknown error")
+                logger.error(f"agy returned status ERROR: {err}")
+                if conversation_id:
+                    logger.warning("Falling back to new conversation after status ERROR...")
+                    return await self._execute_agy(prompt, conversation_id=None)
+                return f"❌ [Antigravity 执行错误]\n{err}", None
+
+            resp_val = data.get("response", "")
+            if isinstance(resp_val, dict):
+                new_id = resp_val.get("newConversation", {}).get("conversationId")
+                if new_id:
+                    new_conv_id = new_id
+                    reply = await self._wait_for_response(new_conv_id, start_line=0, timeout=10.0)
+                else:
+                    reply = ""
+            elif isinstance(resp_val, str):
+                reply = resp_val.strip()
+            else:
+                reply = str(resp_val) if resp_val is not None else ""
+
+            new_conv_id = data.get("conversation_id") or conversation_id or (resp_val.get("newConversation", {}).get("conversationId") if isinstance(resp_val, dict) else None)
+            if not reply and new_conv_id:
+                reply = await self._wait_for_response(new_conv_id, start_line=0, timeout=10.0)
+            return reply or "（Antigravity 已处理该请求）", new_conv_id
+        except Exception as e:
+            logger.error(f"Failed to parse agy JSON output: {out_str}, err: {e}")
+            return out_str or err_str, conversation_id
 
     async def execute(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
         """
-        Executes a user prompt using agentapi.
-        If conversation_id is provided, calls `agentapi send-message`.
-        Otherwise, calls `agentapi new-conversation`.
+        Executes a user prompt using agy CLI (or fallback to agentapi).
         """
-        if not self.agentapi_bin:
+        if not self.agent_bin:
             return "❌ [未找到 agentapi 可执行文件，请确保 Antigravity 环境已就绪]", conversation_id
 
+        try:
+            if self.is_agy:
+                return await self._execute_agy(prompt, conversation_id=conversation_id)
+            else:
+                return await self._execute_agentapi(prompt, conversation_id=conversation_id)
+        except Exception as e:
+            logger.error(f"Failed to execute agent: {e}", exc_info=True)
+            return f"❌ [Antigravity 执行异常]\n{e!s}", conversation_id
+
+    async def _execute_agentapi(self, prompt: str, conversation_id: Optional[str] = None) -> Tuple[str, Optional[str]]:
+        """
+        Executes a user prompt using legacy agentapi.
+        """
         try:
             if conversation_id:
                 start_line = self._count_transcript_lines(conversation_id)
                 logger.info(f"Sending message to conversation {conversation_id} via agentapi...")
-                cmd = [self.agentapi_bin, "send-message", conversation_id, prompt]
+                cmd = [self.agent_bin, "send-message", conversation_id, prompt]
                 env = self._prepare_agentapi_env()
 
                 proc = await asyncio.create_subprocess_exec(
@@ -265,9 +437,10 @@ class AntigravityAgent:
         out_str = stdout.decode("utf-8", errors="replace").strip()
 
         if proc.returncode != 0:
-            err_msg = stderr.decode("utf-8", errors="replace").strip()
+            err_msg = (stdout.decode("utf-8", errors="replace") + "\n" + stderr.decode("utf-8", errors="replace")).strip()
             logger.error(f"agentapi new-conversation failed ({proc.returncode}): {err_msg}")
             return f"❌ [创建会话失败]\n{err_msg}", None
+
 
         try:
             data = json.loads(out_str)
